@@ -157,6 +157,35 @@ request, does the 511-page value land on 8.5.11**. The instrument for it is a br
 `php_url_encode` that only counts hits and prints `$x0`/`$x1` - no memory scan, so the worker is stopped
 for microseconds - combined with a page sweep across the whole chunk instead of four points.
 
+### The encoder is never called on 8.5.11
+
+Counting breakpoint hits without stopping the worker (`gdb/b1_hits.gdb`: `stop()` returns `False`, so the
+worker is held for microseconds) settles where the two builds diverge, and it is not the page:
+
+| build | `php_url_encode` hits during the disclosure request | what it read | cookie |
+| --- | --- | --- | --- |
+| 8.4.26 | **1** | `buf=...37018  len=0xc8000` - our forged header | 1 685 560 chars |
+| 8.5.11 | **0** | - | none |
+
+So on 8.5.11 the session cookie is never encoded, which means the session is not initialised-as-sending in
+that request at all. A page sweep cannot fix a call that never happens, and the earlier sweeps over
+`0x135..0x138` were measuring the wrong thing entirely.
+
+**What that leaves open, precisely:** why `php_session_send_cookie` is not reached on 8.5.11 while the same
+body reaches it on 8.4.26. Two candidate explanations, and both need an instrument this image does not
+provide:
+
+- `php_ps_globals` changed layout between the builds, so the flag that means "send the cookie" is at a
+  different offset - and the arming, which leaves that flag set on 8.4.26, no longer does so on 8.5.11;
+- the session-start path itself changed (the upload-progress callback ordering), so the request never
+  enters the code that sends the cookie.
+
+Reading the layout means DWARF, and these images ship symbols without debug info: `ptype ps_globals`
+returns nothing, which is why every offset in this document was obtained by resolving addresses and
+reading memory instead. Two ways forward, in ascending cost: diff `ext/session` between 8.4.26 and 8.5.11
+for the send-cookie and rfc1867-callback paths, or build 8.5.11 with `-g` (the FPM debug build recipe in
+`lab-fpm/` is reusable) and read the struct layout directly.
+
 **Also measured:** `main - idchunk = 0x1000000` on 8.5.11 (against `0x400000` on 8.4.26). That number turns
 the disclosed chunk into the main chunk, so it needs confirming over several fresh containers once a leak
 exists.
