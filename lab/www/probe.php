@@ -27,6 +27,7 @@ $walk = function ($value, $depth) use (&$walk, &$deepest, &$count) {
 $walk($_POST, 0);
 echo json_encode([
     'php' => PHP_VERSION,
+    'pid' => getmypid(),
     'post_top_level' => count($_POST),
     'post_nodes' => $count,
     'post_depth' => $deepest,

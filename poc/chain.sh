@@ -118,9 +118,19 @@ sleep 1
 
 HT=$(mktemp)
 python3 "$HERE/mk_fake_ht.py" --ht "$S" --zif "$ZIF_SYSTEM" --cmd "$CMD" --out "$HT"
-python3 "$HERE/b2_exec.py" --url "$TARGET" --ht-addr "$S" --ht-file "$HT" --vl 384 \
-        --n1 500 --n2 495 --rc 1
+B2OUT=$(python3 "$HERE/b2_exec.py" --url "$TARGET" --ht-addr "$S" --ht-file "$HT" --vl 384 \
+        --n1 500 --n2 495 --rc 1)
+echo "$B2OUT"
 rm -f "$HT"
+# A successful fire ends with the worker dead, so the client sees the connection drop ("response=0"). An
+# answered request means B2 landed on a child that never held the stale state - the usual cause is a pool
+# bigger than the number of workers we pinned.
+case "$B2OUT" in
+  *"response=0"*) ;;
+  *) echo "[!] B2 was answered instead of dropping the connection: this request did not reach the child" >&2
+     echo "    that held the stale session state. With more than one worker that is a pinning race -" >&2
+     echo "    re-run, or use the single-worker target (lab/start_target.sh --single)." >&2 ;;
+esac
 sleep 2
 
 echo "proof:"

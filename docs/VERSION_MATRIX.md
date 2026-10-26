@@ -312,6 +312,28 @@ change is backward compatible and removes a latent fragility rather than adding 
 One process note: with a single Apache child the crash that ends the chain takes the container down, so
 the proof has to be read with ``docker cp`` from the stopped container, not ``docker exec``.
 
+## Reliability by pool size, measured on x86-64
+
+The chain needs all four requests to reach the same Apache child, because what A1 leaves behind is that
+child's heap. On a pool bigger than one that is a race, and it is worth stating with numbers rather than
+being discovered by a user:
+
+| target | runs | proof |
+| --- | --- | --- |
+| single worker (`lab/start_target.sh --single`) | 5 | **5/5** |
+| stock MPM, `hold_workers.py` pinning 149 connections | 3 | **1/3** |
+
+Pinning itself works - with the holder established, four plain probe requests all came back with the same
+`pid`, and without it they scattered across four children. What does not hold is that the *free* child at
+step N is the same one as at step N+1: the pool is smaller than the number of held connections (69
+children for 149 open sockets in this image), so a request is accepted by whichever child frees up, and
+after the arming step that is not guaranteed to be the armed one.
+
+`chain.sh` therefore prints a warning when B2 comes back answered instead of dropping the connection -
+that is the signature of this race, and without it the failure looks like a broken exploit rather than a
+lost race. The menu's custom-command path now uses the single-worker baseline, since the command is the
+point of that option and the pool is not.
+
 ## Limits
 
 - The signature is not the chain. A `4096` says the arming step is reachable; it does not by itself
