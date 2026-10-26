@@ -40,6 +40,19 @@ php@sha256:60111400ff77bdc44fa79b4f072afe49a42abba71e0846ad496be4761dc9c11a   (p
 They are facts about that binary, not about PHP in general. Pinning the digest in `lab/start_target.sh`
 is there to keep that statement true over time.
 
+## Publication plan
+
+This repository is **private** and holds the working exploit. The analysis half is already published
+separately as `ggsec-de/php2shell-analysis`: the negative control, the version matrix, the FPM result and
+the lab harness, with no exploit code.
+
+The plan is to flip this repository to public on **25 November 2026**, at which point the two halves stand
+side by side: the measurements, and the code that produced them. Flipping visibility publishes the *whole*
+history, including every commit made before that date, which is the intent here and the reason this file
+exists.
+
+If the date moves, change this section in the same commit, so the plan on record is the current one.
+
 ## Licence
 
 **MIT**, copyright 2026 GG ADVANCED IT Security UG. The full text is in [LICENSE](LICENSE).
