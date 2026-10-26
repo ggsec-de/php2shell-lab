@@ -239,6 +239,52 @@ the disclosed chunk into the main chunk, so it needs confirming over several fre
 exists.
 
 
+## x86-64: the shape transfers, the execution constants do not
+
+The whole point of a second architecture is to separate "this is a property of PHP" from "this is a
+property of our arm64 image". The run was done on a WSL2 Ubuntu 24.04 host (Docker 29.1.3, kernel
+x86_64) against `php:8.4.26-apache`, amd64, same stock ini.
+
+**Everything up to and including the disclosure transfers unchanged.** Same bodies, same spec
+(`G:511:0x137*14,G:400:0x137,X:900`), same page `0x137`:
+
+| step | arm64 | x86-64 |
+| --- | --- | --- |
+| A1 arming | `tried to allocate 4096` | `tried to allocate 4096` |
+| B1 disclosure | cookie 1 658 180 chars | cookie 1 659 862 chars |
+| decoded window | 819 200 B | 819 200 B |
+| `zval_ptr_dtor` copies in the window | 876 | **876** |
+| `main - disclosed chunk` | `0x400000` | **`0x400000`** |
+
+That is a strong result on its own: the geometry of the arming and the disclosure is a property of the
+session handler, not of the CPU. The constants that differ are exactly the ones the image's symbol table
+supplies, and they were confirmed twice - `nm` on the extracted `libphp.so`, and the profile kept from the
+earlier lab:
+
+```
+zval_ptr_dtor      0x65EB60      zif_system       0x465370
+zend_hash_destroy  0x6138F0      php_url_encode   0x4BC590
+```
+
+**A real bug in our tooling surfaced here, and it was ours.** `decode_leak_cookie.py` defined a pointer as
+`0x7F00_0000_0000 <= qword < 0x8000_0000_0000`, which is where the arm64 kernel puts `mmap`. On x86-64
+under WSL the heap came back at `0x749F_...`, i.e. *below* that range, so the decoder reported a full
+800 KiB window as containing no pointers, and `leak_addrs.py` refused with "0 pointers in the best
+cluster". The window was fine. The test was arm64-specific and would have blocked any x86-64 work
+silently. It is now the test that holds on both: above the null page and bit 47 clear. `poc/analyze_leak.py`
+was added at the same time, because "is there anything here to derive from" is a different question from
+"give me the addresses", and it prints what the window actually contains when the answer is no.
+
+**Where it stops: the execution stage.** A2 lands (`211 / HTTP 500`), B2 sends, the worker dies - and no
+proof file appears. So `S = main + 0xF8398`, `hsv = main + 0x7D720` and the B2 shape (`--vl 384 --n1 500
+--n2 495 --rc 1`) are arm64 constants. They describe the layout of `ps_globals` and the free-list state
+the reference spray has to hit, and both are build properties. Recalibrating them is the same kind of work
+as the original 23 iterations, with the same instruments - which is why it is not attempted here in
+passing.
+
+One process note worth recording: with a single Apache child, the crash that ends the chain takes the
+container down, so the proof has to be read with `docker cp` from the stopped container, not `docker exec`.
+
 ## Limits
 
 - The signature is not the chain. A `4096` says the arming step is reachable; it does not by itself

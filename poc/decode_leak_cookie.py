@@ -47,8 +47,13 @@ DEFAULT_SYMBOLS = {
 }
 
 CHUNK_MASK = ~0x1FFFFF  # Zend MM chunks are 2 MiB aligned
-MIN_PTR = 0x0000_7F00_0000_0000
-MAX_PTR = 0x0000_8000_0000_0000
+
+# What counts as a user-space pointer. The first version of this was 0x7f00_0000_0000..0x8000_0000_0000,
+# which is where the arm64 kernel puts mmap - and on x86-64 under WSL the heap came back at 0x749f_....,
+# i.e. below the range, so a full 800 KiB window was reported as holding no pointers at all. The test is
+# now the one that is true on any 64-bit target: above the null page, and in the lower canonical half.
+MIN_PTR = 0x0000_0000_0001_0000      # above the null page
+MAX_PTR = 0x0000_8000_0000_0000      # bit 47 clear: user space on 4- and 5-level paging
 
 
 def load_cookie(args):
