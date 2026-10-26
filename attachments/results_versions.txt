@@ -1,0 +1,19 @@
+# var_destroy re-entry UAF - stock builds, default Zend MM, probe length 8160
+# date: 2026-10-26   host: aarch64 (linux/arm64), official php images
+# process exit 139 = SIGSEGV; 0 = survived
+
+php:5.6-cli            php 5.6.40   survived   (trigger rewritten for 5.6 syntax)
+php:7.0-cli            php 7.0.33   SIGSEGV  
+php:7.1-cli            php 7.1.33   SIGSEGV  
+php:7.2-cli            php 7.2.34   SIGSEGV  
+php:7.3-cli            php 7.3.33   SIGSEGV  
+php:7.4-cli            php 7.4.33   SIGSEGV  
+php:8.0-cli            php 8.0.30   SIGSEGV  
+php:8.1-cli            php 8.1.34   SIGSEGV  
+php:8.2.34-cli         php 8.2.34   SIGSEGV  
+php:8.2.35-cli         php 8.2.35   SIGSEGV  
+php:8.3.36-cli         php 8.3.36   SIGSEGV  
+php:8.4.26-apache      php 8.4.26   SIGSEGV  
+php:8.4.27-apache      php 8.4.27   SIGSEGV  
+php:8.5.11-apache      php 8.5.11   SIGSEGV  
+php:8.5.12-cli         php 8.5.12   SIGSEGV  

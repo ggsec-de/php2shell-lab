@@ -1,0 +1,2 @@
+# reliability - php:8.5.12-cli, default Zend MM, probe length 8160, 100 fresh processes
+runs=100  SIGSEGV=100  survived=0

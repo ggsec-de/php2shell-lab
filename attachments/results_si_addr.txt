@@ -1,0 +1,8 @@
+# si_addr for different fillers and reference indices - php:8.5.12-cli, default Zend MM
+# gdb: print/x $_siginfo._sifields._sigfault.si_addr at the fault
+
+len=8160 ref=R:1021;  fill=B   si_addr=0x424242424242424a
+len=8160 ref=R:1021;  fill=C   si_addr=0x434343434343434b
+len=8160 ref=R:1021;  fill=PAT si_addr=0xf0e0d0c0b0a0910
+len=8160 ref=R:1020;  fill=PAT si_addr=0x706050403020108
+len=8160 ref=R:1000;  fill=PAT si_addr=<no fault: survived>
