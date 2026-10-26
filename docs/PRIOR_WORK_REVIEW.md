@@ -81,6 +81,45 @@ matters.
 So "not fixed in 8.5.12, fix ships in 8.5.13" is accurate. The repository also credits the prior reporter
 (`janhelke`, GH-24373) rather than claiming discovery, which is the honest way round.
 
+## 2a. It is not crash-only: the pointer is controlled on a stock build
+
+The published material stops at a controlled pointer under ASAN, where Zend's allocator is bypassed, and
+their README's "9.8 RCE" line is not backed by a working chain. The question that decides the severity is
+therefore: does the primitive survive on a **stock** build, with Zend MM active and nothing special set?
+
+Measured with `poc/uaf_reclaim_probe_gen.py` on `php:8.5.12-cli` (official image, default allocator),
+reclaiming the freed block with a string of controlled bytes and then reading a zval pointer out of it:
+
+| reclaim length | result |
+| --- | --- |
+| 8100, 8130, 8150, 8159, **8160** | **SIGSEGV** |
+| 8161, 8170, 8200, 9000 | survives |
+
+The boundary at 8160 is the size of the freed entries block, which is what makes this a reclaim rather
+than a coincidence. And the fault is not wild:
+
+```
+Program received signal SIGSEGV
+$1 = 0x424242424242424a          <- our 'B' bytes
+#1  php_var_unserialize ()
+```
+
+`si_addr` is attacker-chosen. The trailing `4a` is the length byte of the `zend_string` header, i.e. the
+read starts two bytes past our data - a detail for whoever builds the next step.
+
+So the primitive on a stock build is "an 8-byte value we choose, used as a `zval*` and dereferenced". That
+is the same primitive our own chain uses, and it is enough for a full chain in principle: aim it at a fake
+zval inside a buffer we already control, let the destructor slot resolve to a call.
+
+**This changes the severity argument, and that is the part worth reporting.** "Not fixed in 8.5.12, fix
+ships in 8.5.13" reads as a reason to wait for the next release. A controlled dereference on the default
+allocator reads as a reason to backport to every maintained branch now, because 8.2/8.3/8.4 users have no
+8.5.13 to wait for.
+
+We stop here deliberately: the remaining step is assembling leak + fake zval + call into a working weapon,
+and that is not something to have lying around while every released PHP is unpatched. The measurement above
+is what a vendor needs to prioritise; the exploit is not.
+
 ## 3. What this changes about our own work
 
 Nothing. Our chain is the `session.upload_progress` stale-identifier bug (CVE-2026-109618/109619); theirs is
