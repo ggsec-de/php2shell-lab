@@ -182,9 +182,12 @@ deterministic way. **What it is not:** a chain. There is no leak here, no fake z
 | tests present in tag `php-8.5.12` | **no** — 27 701 files in the tag, neither test |
 | tests present on `master` | yes |
 | `php-8.5.13` tag | does not exist yet |
+| reported to `security@php.net` | 2026-10-26, no reply yet |
 
 So "not fixed in 8.5.12" is accurate, and "ships in 8.5.13" is a plan rather than a fact. Nothing here says
-whether the fix is intended for the 8.2/8.3/8.4 branches, which is the question worth asking the PHP team.
+whether the fix is intended for the 8.2/8.3/8.4 branches, which is the question we put to the PHP team on
+2026-10-26; the reply and the resulting backport position belong in this table, and `README.md` and
+`NOTICE.md` should quote it rather than guess.
 
 ## 6. Prior art and what the publishing party did and did not show
 

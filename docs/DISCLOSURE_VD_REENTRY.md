@@ -1,4 +1,7 @@
-# Disclosure draft — var_destroy re-entry UAF (GH-24373) exploitability
+# Disclosure — var_destroy re-entry UAF (GH-24373) exploitability
+
+Sent 2026-10-26. This file keeps the draft and the send record; the text that actually went out is
+`docs/EMAIL_VD_REENTRY.md`.
 
 To: security@php.net
 Subject: GH-24373 follow-up: the re-entry UAF is a controlled pointer dereference on a stock build
@@ -92,11 +95,35 @@ security contact: research@ggsec.de
 
 ---
 
-## Operational notes before sending
+## Send record
 
-- Attach: the probe script, the ASAN report, and the gdb `si_addr` transcript. Do not attach the whole lab.
-- Keep the tone as above: measured, no CVSS number, no "0-day" framing.
-- If they ask for the chain, the answer is the one already stated: we have not built it and do not intend to
-  before a patched release.
-- Record their reply here, including the backport decision, so the timeline in `README.md` and `NOTICE.md`
-  can be updated with facts rather than assumptions.
+| field | value |
+| --- | --- |
+| sent | 2026-10-26 |
+| to | security@php.net |
+| subject | GH-24373 follow-up: the re-entry UAF is a controlled pointer dereference on released builds |
+| body | the text in `docs/EMAIL_VD_REENTRY.md` |
+| attachments | the six files in `attachments/` |
+
+The draft above is the earlier, longer version. Where the two differ — subject line, section numbering, the
+shorter signature — the email file is authoritative, and it is the one that was sent.
+
+## Reply tracking
+
+| date | event | outcome |
+| --- | --- | --- |
+| 2026-10-26 | sent | — |
+
+Record their reply here and in `docs/VD_REENTRY_FULL.md` section 5, so `README.md` and `NOTICE.md` can state
+the backport position as fact rather than assumption.
+
+What each answer changes:
+
+1. **backport to 8.2/8.3/8.4** — decides whether the exposed range reads as "wait for 8.5.13" or "seven
+   lines with no release to wait for".
+2. **further material wanted** — decides whether we hand the probes over as-is or re-cut them for them.
+3. **hold the write-up** — stated default is hold; no reply does not change it.
+
+If there is no reply by 2026-11-02, send one short nudge quoting the subject line and asking only question 1.
+Do not escalate before 2026-11-09, and do not publish the write-up before a release containing 08f4b64 ships,
+whatever the thread says.

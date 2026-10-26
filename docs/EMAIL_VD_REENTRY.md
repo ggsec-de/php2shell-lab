@@ -1,6 +1,7 @@
 Subject: GH-24373 follow-up: the re-entry UAF is a controlled pointer dereference on released builds
 
 To: security@php.net
+Sent: 2026-10-26
 
 ---
 
@@ -85,10 +86,13 @@ research@ggsec.de
 
 ---
 
-## Before sending
+## Sent 2026-10-26
 
-- Attach the six files from `attachments/`. Nothing else from the lab.
+- Six files from `attachments/`, nothing else from the lab.
+
+Still standing:
+
 - If they ask for a PoC that calls something: we have not built one and do not intend to before a patched
   release; say so plainly rather than implying it exists.
-- Record the reply in `docs/VD_REENTRY_FULL.md` (backport decision, timeline), so the schedule in the
-  write-up can reference facts.
+- Record the reply in `docs/VD_REENTRY_FULL.md` (backport decision, timeline) and in the tracking table in
+  `docs/DISCLOSURE_VD_REENTRY.md`.
