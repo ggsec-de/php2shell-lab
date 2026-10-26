@@ -186,6 +186,54 @@ reading memory instead. Two ways forward, in ascending cost: diff `ext/session` 
 for the send-cookie and rfc1867-callback paths, or build 8.5.11 with `-g` (the FPM debug build recipe in
 `lab-fpm/` is reusable) and read the struct layout directly.
 
+### The source diff: one line, and it is about ownership
+
+`ext/session/session.c` was compared between 8.4.26 and 8.5.11 (official tarballs). Three results.
+
+**The send guard did not change.** Both versions call the encoder under exactly
+
+```c
+if (PS(use_cookies) && PS(send_cookie)) {
+    zend_result cookies_sent = php_session_send_cookie();
+```
+
+**`php_session_initialize` gained no validation.** Its whole diff is mechanical: `PS(save_path)` and
+`PS(session_name)` became `zend_string*`, so the calls grew `ZSTR_VAL(...)`. No new length check, no new
+failure path.
+
+**The upload-progress callback changed ownership of the session id.** This is the difference that matters:
+
+```c
+8.4.26   PS(id) = zend_string_init(Z_STRVAL(progress->sid), Z_STRLEN(progress->sid), 0);
+8.5.11   PS(id) = zend_string_copy(Z_STR(progress->sid));
+```
+
+and the same change in the adoption helper (`ppid2sid` became `proposed_session_id_to_session_id`):
+
+```c
+8.4.26   PS(id) = zend_string_init(Z_STRVAL_P(ppid), Z_STRLEN_P(ppid), 0);
+8.5.11   PS(id) = zend_string_copy(Z_STR_P(proposed_session_id));
+```
+
+In 8.4.26 the request allocates a **fresh** small `zend_string` for the id. That allocation is a heap object
+of the size class the arming step leaves dangling, and it is the object the next request's fillers land on -
+which is why the forged header can be planted on the page `PS(id)` points at. In 8.5.11 the id is a
+refcounted copy of the string that `progress->sid` already owns: a different object, allocated at a
+different time, in a different place, and released according to a different refcount. Nothing about the
+guard or the encoding changed; what changed is *which object `PS(id)` is*.
+
+That is the precise answer to "why is the encoder not called": it is not the encoder, and it is not the
+guard. The stale id on 8.5.11 is not the object the arming left in the place the disclosure expects.
+
+**Limitation of this round's instrument.** Hit counting showed both builds reach `php_session_initialize`
+and `php_session_reset_id`, and only 8.4.26 reaches `php_url_encode`. `php_session_send_cookie` itself is
+`static` and absent from the image's symbol table, so it appears as a pending breakpoint and cannot be
+counted - which means "zero hits" for that function would have been an artefact, not a measurement.
+
+**What this implies for a port.** The 8.5.11 route cannot be fixed by tuning pages or counts: the object
+under `PS(id)` is of a different provenance. Either the arming has to leave *that* object dangling (a
+different OOM point), or the disclosure has to read through the progress string instead of the id slot.
+
 **Also measured:** `main - idchunk = 0x1000000` on 8.5.11 (against `0x400000` on 8.4.26). That number turns
 the disclosed chunk into the main chunk, so it needs confirming over several fresh containers once a leak
 exists.
