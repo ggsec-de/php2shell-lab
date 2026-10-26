@@ -73,11 +73,27 @@ trigger means nothing until the original is run next to it.
 Images built from tagged source with AddressSanitizer; `USE_ZEND_ALLOC=0` so that `efree_size` reaches
 `free()` and ASAN can poison the region.
 
-| image (aarch64) | result |
-| --- | --- |
-| `php-asan:8.5.12` | heap-use-after-free, `var_unserializer.c:906`, 8160-byte freed region |
-| `php-asan:8.2.35` | heap-use-after-free |
-| `php-asan:8.2.34` | heap-use-after-free |
+| image (aarch64) | allocator | result |
+| --- | --- | --- |
+| `php-asan:8.5.12` | `USE_ZEND_ALLOC=0` | heap-use-after-free, `var_unserializer.c:906`, 8160-byte freed region |
+| `php-asan:8.2.35` | `USE_ZEND_ALLOC=0` | heap-use-after-free |
+| `php-asan:8.2.34` | `USE_ZEND_ALLOC=0` | heap-use-after-free |
+
+And the same probe on stock images, one run each, which is the measurement that matters for the affected
+range because it uses the default allocator:
+
+| stock image | PHP | result at length 8160 |
+| --- | --- | --- |
+| `php:8.2.34-cli` | 8.2.34 | SIGSEGV |
+| `php:8.2.35-cli` | 8.2.35 | SIGSEGV |
+| `php:8.3.36-cli` | 8.3.36 | SIGSEGV |
+| `php:8.4.26-apache` | 8.4.26 | SIGSEGV |
+| `php:8.4.27-apache` | 8.4.27 | SIGSEGV |
+| `php:8.5.11-apache` | 8.5.11 | SIGSEGV |
+| `php:8.5.12-cli` | 8.5.12 | SIGSEGV |
+
+Seven points across four branches, all crashing with the same probe and the same length. The affected range
+is therefore the whole maintained tree, not just 8.5.
 
 The stack matches the published receipt: read in `php_var_unserialize` ← `php_unserialize_with_options`
 (`var.c:1544`) ← `zif_unserialize` ← `zend_objects_destroy_object` ← `rc_dtor_func` ← `i_zval_ptr_dtor`
@@ -89,31 +105,59 @@ that follows.
 
 ## 4. The same script on a stock build — measured
 
-`php:8.5.12-cli` (official image, default Zend MM, no flags), reclaiming the freed block with a string of
-`B` bytes and then reading a pointer out of it:
+`php:8.5.12-cli` (official image, default Zend MM, no flags). The destructor allocates a string of
+controlled bytes to reclaim the freed block, then reads a `zval*` out of it with `R:<n>`.
+
+### 4.1 Which reclaim lengths work
 
 | reclaim length | result |
 | --- | --- |
-| 8100, 8130, 8150, 8159, **8160** | **SIGSEGV** (rc=139) |
-| 8161, 8170, 8200, 9000 | survives, `outer=true` |
+| 512, 1024, 2048 | survives |
+| **3072, 4000, 6000, 7000, 8000, 8100, 8150, 8158, 8159, 8160** | **SIGSEGV** |
+| 8161, 8162, 8165, 9000 | survives |
 
-Boundary at 8160 = size of the freed block, which is what makes this a reclaim. Under gdb, for 8100, 8159
-and 8160:
+The window is `3072..8160`, and its edges follow Zend MM's size classes: at or below 3072 an allocation
+comes from the small bins, in a different part of the heap, so it cannot take the freed block; from 3073 up
+allocations are page-based and one of them fits inside the freed 2-page (8192-byte) run; at 8161 the request
+needs a third page and no longer fits. *(Inference from the boundary; the bin mechanics were not traced.)*
+
+### 4.2 Reliability
+
+100 runs at length 8160, fresh process each time:
 
 ```
-Program received signal SIGSEGV
-$_siginfo._sifields._sigfault.si_addr = 0x424242424242424a
-#1  php_var_unserialize ()
+crashes=100  survived=0
 ```
 
-**Interpretation:** seven of the eight bytes are the `0x42` we wrote, so the pointer value is ours. The
-eighth byte `0x4a` is constant across the three lengths, therefore not our data and not the `zend_string`
-length (which changes with the length). **Unknown:** what that byte is, and at exactly which offset the
-read lands. Both are one measurement away — print the eight bytes at the faulting read's source — and both
-matter for anyone building the next step.
+Not a race. This is deterministic on this build.
 
-**Not established:** reliability. The sweep above is one run per length. A 100-run repeat at 8160 would say
-whether this is deterministic or a race, and we have not done it.
+### 4.3 The pointer is ours
+
+| run | `si_addr` |
+| --- | --- |
+| filler `B` (0x42), `R:1021` | `0x424242424242424a` |
+| filler `C` (0x43), `R:1021` | `0x434343434343434b` |
+| filler `0..255` pattern, `R:1021` | `0x0f0e0d0c0b0a0910` |
+| filler `0..255` pattern, `R:1020` | `0x0706050403020108` |
+| filler `0..255` pattern, `R:1000` | survives |
+
+Three facts fall out of that table:
+
+- **the filler propagates**: `0x42` and `0x43` produce addresses built from `0x42` and `0x43`;
+- **the read position is ours**: the positional pattern reconstructs the bytes, so the value is read out of
+  the buffer we allocated, not out of stale memory;
+- **the reference index selects the window**: `R:1020` and `R:1021` differ by `0x0808080808080808`, i.e.
+  exactly one step of eight bytes in the pattern. `R:1000` survives, so not every index lands on a
+  non-canonical value - the index matters.
+
+**Open detail, stated rather than glossed:** with a constant filler seven of the eight bytes are the filler
+and the eighth is `filler + 8` (`0x42 -> 0x4a`, `0x43 -> 0x4b`); with the pattern the eight bytes are not a
+simple consecutive window either. The composition of that one byte is unresolved. It does not change the
+conclusion - the pointer is dominated by data we choose and changes when we change it - but anyone building
+on this needs to know the byte is not free.
+
+**What this is:** an attacker-chosen 8-byte value dereferenced as a `zval*`, on the default allocator, in a
+deterministic way. **What it is not:** a chain. There is no leak here, no fake zval, and no call.
 
 ## 5. Fix status — measured
 

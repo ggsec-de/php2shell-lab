@@ -18,8 +18,9 @@ bytes turns the subsequent `R:` read into a dereference of a pointer we control:
 ```
 php:8.5.12-cli (official image, default Zend MM, no special flags)
 
-  reclaim length 8100..8160   ->  SIGSEGV, si_addr = 0x424242424242424a
-  reclaim length 8161+        ->  survives
+  reclaim length 3072..8160       ->  SIGSEGV, si_addr built from our filler
+  reclaim length <=2048, >=8161   ->  survives
+  100 consecutive runs at 8160    ->  100 crashes, 0 survivors
 ```
 
 The 8160 boundary is the size of the freed entries block, so this is a reclaim and not a coincidence. The
@@ -36,7 +37,15 @@ value is used as a `zval*` and dereferenced, which is the primitive a full chain
 | 8.5.12, tagged source, ASAN | `USE_ZEND_ALLOC=0` | heap-use-after-free, `var_unserializer.c:906` |
 | 8.2.35, tagged source, ASAN | `USE_ZEND_ALLOC=0` | heap-use-after-free |
 | 8.2.34, tagged source, ASAN | `USE_ZEND_ALLOC=0` | heap-use-after-free |
-| 8.5.12 official CLI image | **default Zend MM** | SIGSEGV at `0x42424242...4a` |
+| official CLI/Apache images 8.2.34, 8.2.35, 8.3.36, 8.4.26, 8.4.27, 8.5.11, 8.5.12 | **default Zend MM** | SIGSEGV in every one |
+
+Under gdb, the same probe with different fillers shows the address is ours:
+
+```
+filler B (0x42)    si_addr = 0x424242424242424a
+filler C (0x43)    si_addr = 0x434343434343434b
+0..255 pattern     si_addr = 0x0f0e0d0c0b0a0910    (R:1020 gives 0x0706050403020108)
+```
 
 Trigger shape, for reproduction: more than `VAR_ENTRIES_MAX` (1018) pushes so the entries are chained, plus
 an object that reaches a `var_dtor` slot. A duplicate key does the ownership transfer:
