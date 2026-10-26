@@ -165,7 +165,7 @@ def summarise(blob, symbols):
         "chunk_base": top_base,
         "chunk_base_votes": top_count,
         "chunk_base_share": round(top_count / len(hits), 3) if hits else 0.0,
-        "other_bases": [(hex(base), count) for base, count in bases.most_common(5)[1:]],
+        "other_bases": [(hex(base), count) for base, count in bases.most_common(16)[1:]],
         "repeated_qwords": len(repeated),
         "symbol_hits": symbol_hits[:10],
         "libphp_base": libphp_base,

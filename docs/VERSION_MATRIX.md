@@ -275,15 +275,42 @@ silently. It is now the test that holds on both: above the null page and bit 47 
 was added at the same time, because "is there anything here to derive from" is a different question from
 "give me the addresses", and it prints what the window actually contains when the answer is no.
 
-**Where it stops: the execution stage.** A2 lands (`211 / HTTP 500`), B2 sends, the worker dies - and no
-proof file appears. So `S = main + 0xF8398`, `hsv = main + 0x7D720` and the B2 shape (`--vl 384 --n1 500
---n2 495 --rc 1`) are arm64 constants. They describe the layout of `ps_globals` and the free-list state
-the reference spray has to hit, and both are build properties. Recalibrating them is the same kind of work
-as the original 23 iterations, with the same instruments - which is why it is not attempted here in
-passing.
+**The execution stage transfers too, once ``main`` is derived correctly.** ``S = main + 0xF8398``,
+``hsv = main + 0x7D720`` and the B2 shape (``--vl 384 --n1 500 --n2 495 --rc 1``) are identical on both
+architectures and needed no change. What blocked the first attempt was not them, it was the *chunk delta*.
 
-One process note worth recording: with a single Apache child, the crash that ends the chain takes the
-container down, so the proof has to be read with `docker cp` from the stopped container, not `docker exec`.
+On arm64 ``main = disclosed + 0x400000`` held 3/3 on fresh containers, so it was written down as a
+constant. On x86-64 the same measurement gave **0x200000, 0x600000 and 0x800000** in three fresh
+containers - a fixed delta scored **1/3**, and the failure looked like a broken execution stage while the
+addresses were simply wrong.
+
+The window itself carries the answer: besides the disclosed-chunk cluster (6335 pointers) and the module
+cluster (876), there is a third cluster of **454** chunk pointers, and that cluster *is* the main chunk.
+``leak_addrs.py`` now reads it out of the leak instead of assuming a distance:
+
+```
+main chunk : 0x7df35a400000  (= second chunk cluster in the leak (454 pointers, +0x800000 from disclosed))
+```
+
+Results with the derived ``main``:
+
+| target | runs | proof |
+| --- | --- | --- |
+| x86-64, fresh container each run | 3 | **3/3 ``uid=33(www-data)``** |
+| arm64, fresh container | 1 (regression) | **1/1 ``uid=33(www-data)``** |
+
+On arm64 the derived distance came out as ``+0x400000``, i.e. the constant that was there before - so the
+change is backward compatible and removes a latent fragility rather than adding a special case.
+
+**Two things had to be fixed in our own tooling to get here**, and both were silent:
+
+- the pointer test was the arm64 ``mmap`` range, which rejects valid x86-64 heap addresses (see above);
+- ``summarise()`` reports chunk clusters from a list that slides one **byte** at a time, so every real
+  pointer appears eight times and the candidate list fills with bases like ``0x0`` and ``0x100000000``.
+  Cluster counting for the main chunk is done on aligned qwords instead.
+
+One process note: with a single Apache child the crash that ends the chain takes the container down, so
+the proof has to be read with ``docker cp`` from the stopped container, not ``docker exec``.
 
 ## Limits
 
