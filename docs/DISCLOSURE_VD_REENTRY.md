@@ -37,7 +37,11 @@ value is used as a `zval*` and dereferenced, which is the primitive a full chain
 | 8.5.12, tagged source, ASAN | `USE_ZEND_ALLOC=0` | heap-use-after-free, `var_unserializer.c:906` |
 | 8.2.35, tagged source, ASAN | `USE_ZEND_ALLOC=0` | heap-use-after-free |
 | 8.2.34, tagged source, ASAN | `USE_ZEND_ALLOC=0` | heap-use-after-free |
-| official CLI/Apache images 8.2.34, 8.2.35, 8.3.36, 8.4.26, 8.4.27, 8.5.11, 8.5.12 | **default Zend MM** | SIGSEGV in every one |
+| official images, **every release from 7.0.33 to 8.5.12**: 7.0.33, 7.1.33, 7.2.34, 7.3.33, 7.4.33, 8.0.30, 8.1.34, 8.2.34, 8.2.35, 8.3.36, 8.4.26, 8.4.27, 8.5.11, 8.5.12 (14 releases, 11 lines) | **default Zend MM** | SIGSEGV in every one |
+| `php:5.6-cli` 5.6.40, trigger rewritten for 5.6 syntax | default Zend MM | survives |
+
+The affected range we measured is therefore 7.0 through 8.5.12; 5.6 does not reproduce with the same shape.
+Since the fix exists only on `master` and no 8.5.13 has shipped, **no released PHP contains it**.
 
 Under gdb, the same probe with different fillers shows the address is ours:
 

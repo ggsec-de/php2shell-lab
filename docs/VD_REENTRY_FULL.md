@@ -84,6 +84,14 @@ range because it uses the default allocator:
 
 | stock image | PHP | result at length 8160 |
 | --- | --- | --- |
+| `php:5.6-cli` | 5.6.40 | **survives** (5.6-compatible trigger, sanity-checked against 7.4) |
+| `php:7.0-cli` | 7.0.33 | SIGSEGV |
+| `php:7.1-cli` | 7.1.33 | SIGSEGV |
+| `php:7.2-cli` | 7.2.34 | SIGSEGV |
+| `php:7.3-cli` | 7.3.33 | SIGSEGV |
+| `php:7.4-cli` | 7.4.33 | SIGSEGV |
+| `php:8.0-cli` | 8.0.30 | SIGSEGV |
+| `php:8.1-cli` | 8.1.34 | SIGSEGV |
 | `php:8.2.34-cli` | 8.2.34 | SIGSEGV |
 | `php:8.2.35-cli` | 8.2.35 | SIGSEGV |
 | `php:8.3.36-cli` | 8.3.36 | SIGSEGV |
@@ -92,8 +100,13 @@ range because it uses the default allocator:
 | `php:8.5.11-apache` | 8.5.11 | SIGSEGV |
 | `php:8.5.12-cli` | 8.5.12 | SIGSEGV |
 
-Seven points across four branches, all crashing with the same probe and the same length. The affected range
-is therefore the whole maintained tree, not just 8.5.
+**Fourteen releases across eleven development lines**, from 7.0.33 to 8.5.12, all crashing with the same
+probe at the same length. **5.6.40 is the one build that survives**, measured with a trigger rewritten for
+5.6 syntax and sanity-checked against 7.4, so the lower bound of the affected range sits between 5.6 and 7.0.
+
+Caveats on the range, stated plainly: one image per line (the latest patch of each), plus a second point on
+8.2 (8.2.34) and on 8.4 (8.4.26). Intermediate patch levels were not sampled, so the honest claim is "every
+release we tested from 7.0 to 8.5.12", not "every patch level since 7.0".
 
 The stack matches the published receipt: read in `php_var_unserialize` ← `php_unserialize_with_options`
 (`var.c:1544`) ← `zif_unserialize` ← `zend_objects_destroy_object` ← `rc_dtor_func` ← `i_zval_ptr_dtor`
