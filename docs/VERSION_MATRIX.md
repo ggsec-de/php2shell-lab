@@ -84,6 +84,78 @@ that: with the gate removed and the parser fully engaged, the granularity is sti
 `php-fixed:8.5.12` and `php:8.3.36` as clean negatives (0/3 leak, 0/3 fire) and 8.3.x as structurally
 blocked for this chain class. The signature table above agrees, by a different instrument.
 
+## Porting to 8.5.11: what transfers and what does not
+
+The table above says 8.5.11 is affected. Making our own tooling actually run there is a separate question,
+and it was attempted. This is the state of that attempt, with the numbers.
+
+**Constants that transfer.** Everything resolvable from the image's own symbol table:
+
+| symbol | 8.5.11 | 8.4.26 |
+| --- | --- | --- |
+| `zval_ptr_dtor` | `libphp + 0x761B80` | `libphp + 0x638120` |
+| `zif_system` | `libphp + 0x5314F0` | `libphp + 0x42CD70` |
+| `zend_hash_destroy` | `libphp + 0x715A48` | `libphp + 0x5EEFC8` |
+| `php_url_encode` | `libphp + 0x58B780` | `libphp + 0x484820` |
+
+Three independent sources agree on the first two: `nm` on the extracted `libphp.so`, `gdb` resolving the
+symbols in a live worker, and the 8.5.11 profile kept from the earlier lab. The module lives at
+`/usr/lib/apache2/modules/libphp.so` on both images (Debian layout, not `/usr/local`).
+
+**The arming step transfers.** A1 on a fresh 8.5.11 target at stock ini produces the same failure
+(`Allowed memory size of 134217728 bytes exhausted (tried to allocate 4096 bytes)`), and the stale session
+id survives into the next request - measured twice, and read directly with `gdb/a1_id_state.gdb`:
+
+```
+PS(id)=0x7fff55936000  page=0x136   gc=0x1600000001 (refcount=1 type=0x16) len=0x20     8.5.11
+PS(id)=0x7fff31f37000  page=0x137   gc=0x1600000001 (refcount=1 type=0x16) len=0x20     8.4.26
+val[] = 32 hex characters + NUL     <- intact on both
+```
+
+So both builds leave a *readable* `zend_string` under the dangling pointer, one page apart.
+
+**The disclosure does not transfer.** With the 8.4.26 spec (`G:511:0x137*14,G:400:0x137,X:900`) the request
+dies before the encoder ever runs:
+
+```
+#0 ps_close_files   #1 ps_open_files   #2 php_session_initialize
+#3 php_session_rfc1867_callback   #4 rfc1867_post_handler   #5 sapi_handle_post
+```
+
+That stack is the explanation: `php_session_initialize` is called from inside the upload-progress callback,
+i.e. **at the start of body parsing**, and it dereferences `PS(id)` through `ps_open_files -> ps_close_files`.
+On 8.4.26 the page the spec forges is the page the id lives on, so that dereference reads our bytes. On
+8.5.11 the id is one page lower (`0x136` against `0x137`), so the forged header misses it and the fillers
+overwrite the real string header instead.
+
+Measured with `gdb/b1_id_page.gdb` (breakpoint on `ps_close_files`, then scan for the value marker):
+
+| spec | result |
+| --- | --- |
+| `G:511:0x137*14,...` | no response; marker **not** in the id chunk, not in +/-16 chunks (32 MiB) |
+| `G:511:0x136*14,...` | no response; same |
+| `G:510:0x136*14,...` | `200 OK`, 195 bytes, **no OOM at all** |
+
+The middle row is the informative one: moving the header onto the id page is not enough, because the
+*value itself* is not in the id chunk. `G:511` means "start at page 1 of the chunk and cover 511 pages", so
+it only works if that allocation returns the chunk A1 freed. On 8.5.11 it does not: the earlier parts of the
+request consume it first, and `G:510` shows the value then never reaches the ceiling at all.
+
+**The next lever** is therefore not the header page but the *order of allocations* in the disclosure
+request, so that the 511-page value is the allocation that returns to the freed chunk. The knobs are
+`--prefix-count` / `--prefix-pages` and the number of `G` items; the instrument is `gdb/b1_id_page.gdb`,
+because it answers "is the marker in the id chunk" before any cookie exists.
+
+**Also measured:** `main - idchunk = 0x1000000` on 8.5.11 (against `0x400000` on 8.4.26). That number turns
+the disclosed chunk into the main chunk, so it needs confirming over several fresh containers once a leak
+exists.
+
+Instruments added by this attempt, all kept:
+
+- `gdb/a1_id_state.gdb` - is the string under `PS(id)` intact after arming;
+- `gdb/b1_id_page.gdb` - the id page, plus every chunk around it that carries the value marker;
+- `gdb/b1_page_finder.gdb` - where the encoder reads from, when it is reached at all.
+
 ## Limits
 
 - The signature is not the chain. A `4096` says the arming step is reachable; it does not by itself

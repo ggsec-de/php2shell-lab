@@ -99,7 +99,8 @@ docs/
   POC_CHAIN.md                 the chain, the address model, the runbook, the limits
   NEGATIVE_CONTROL_8.4.27.md   protocol, results, and what "no evidence" is defined to mean
   FPM.md                       why the chain is prefork-specific, measured against nginx + FPM
-  VERSION_MATRIX.md            which builds still arm: the 4096 signature across six images
+  VERSION_MATRIX.md            which builds still arm: the 4096 signature across six images, plus the
+                               8.5.11 port attempt and what it takes
   B1_GATE.md                   23 iterations of the research log, including the retractions
   A1_CALIBRATION.md            where the arming OOM must land and why
   SID_ADOPTION.md              can the chain choose its own session id (stock ini)?
@@ -174,6 +175,9 @@ official image (its symbol table is enough; no debug build needed):
 | `b_tail_live.gdb` | the chunk the disclosure encode actually reads (parks on `php_url_encode`) |
 | `b_dtor_tag.gdb` | how the destructor pointers are stored, tagged or not |
 | `b_tail_probe.gdb` | module pointers in the chunk after a request |
+| `a1_id_state.gdb` | is the string under `PS(id)` still intact after the arming request |
+| `b1_id_page.gdb` | the page `PS(id)` sits on, and which surrounding chunks carry the forged value |
+| `b1_page_finder.gdb` | where the encoder actually reads from, on a build where the geometry is unknown |
 | `delta_probe.gdb` | `libphp − heap` distance (recorded to show it is *not* a usable constant) |
 
 ```bash
