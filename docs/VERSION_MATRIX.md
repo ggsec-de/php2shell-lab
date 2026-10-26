@@ -146,73 +146,47 @@ request, so that the 511-page value is the allocation that returns to the freed 
 `--prefix-count` / `--prefix-pages` and the number of `G` items; the instrument is `gdb/b1_id_page.gdb`,
 because it answers "is the marker in the id chunk" before any cookie exists.
 
-### Correction: the header page was the whole problem, and it is now fixed
+### What is actually established, with the harness corrected
 
-Reading the `zend_string` at the moment `ps_close_files` is entered - not by scanning for a marker, which
-does not exist for a `G` item because those values are filled with `A` - separates the two builds cleanly.
-With the 8.4.26 spec (`p = 0x137`) on 8.5.11 the id page still holds filler:
+Two harness mistakes invalidated earlier readings in this section, and both are worth recording because
+they look like results:
 
-```
-8.4.26  PS(id) page 0x137  gc=0x1600000000 (refcount=0 type=0x16) len=0xc8000   <- forged header
-8.5.11  PS(id) page 0x136  gc=0x4141414141414141 len=0x4141414141414141        <- plain 'A'
-```
+1. **The arming body's shape matters.** `a1_arm.py` with only `--sid-hex` still produces the `4096`
+   refusal, but it leaves a different heap layout. Every earlier "no response / SIGSEGV" row in this
+   section, including the `ps_close_files` stacks, was measured in that wrong state. The chain's own
+   arming is `--big 78 --query-n 5 --query-len 1`, and every row below uses it.
+2. **Attaching a debugger perturbs the request.** Catching SIGSEGV with gdb attached produced
+   byte-identical frames on both builds, while 8.4.26 returns a 1.6 MB cookie when nothing is attached.
+   Any stack obtained that way is evidence about the debugger, not about the build.
 
-With `p = 0x136` the same read on 8.5.11 returns `gc=0x1600000000 ... len=0xc8000`, byte for byte what
-8.4.26 shows. So the page is the right one, the forge lands, and the value *is* in the id chunk - the
-earlier "marker not found" was an artefact of looking for a marker that `G` items never write.
+With the harness corrected - single worker, stock ini, one fresh container per row:
 
-**What remains is a different obstacle, and it is not the length.** Even with the forge confirmed, the
-request still dies, and shrinking the claimed length does not help:
+| case | 8.4.26 | 8.5.11 |
+| --- | --- | --- |
+| A1 with the chain shape | `4096` refusal | `4096` refusal |
+| `PS(id)` after A1 | page `0x137`, `len=0x20`, 32 hex chars, intact | page `0x136`, `len=0x20`, 32 hex chars, intact |
+| B1 with `p` = that page | **`200 OK`, cookie 1 679 452 chars** | `200 OK`, 195 bytes, **no cookie** |
+| B1 with `p` swept `0x135..0x138` | not needed (the page above works) | no disclosure at any of the four |
+| segfaults | 0 | 0 |
 
-| `--fake-len` | result |
-| --- | --- |
-| `0xC8000` (800 KiB) | no response |
-| `0x80000` (512 KiB) | no response |
-| `0x8000` (32 KiB) | no response |
+So the summary for 8.5.11 is narrower than an earlier draft of this section claimed:
 
-### A retraction: the `ps_close_files` stack was an artefact
+- the arming step **is** equivalent to 8.4.26: same refusal, same intact stale string, one page lower in
+  the chunk;
+- the disclosure step produces **nothing**, and does not crash. The request completes normally with a small
+  body, which means the forged header is not reached at that point in the request;
+- the earlier claims here about a `ps_close_files` obstacle, and about the forge "landing" with `p=0x136`,
+  were artefacts of the simplified arming and are withdrawn.
 
-An earlier version of this section blamed `ps_close_files` (`ps_open_files <- php_session_initialize <-
-php_session_rfc1867_callback`) and called it the obstacle. That attribution does not survive its own
-control. Catching the SIGSEGV with gdb attached - `handle SIGSEGV stop print`, then `bt` - produces
-byte-identical results on **both** builds:
-
-```
-                       8.5.11                    8.4.26
-pc            ps_close_files+84  ldr w1,[x0,#4]   ps_close_files+84  ldr w1,[x0,#4]
-x0            0x4f49535345535f50                  0x4f49535345535f50
-si_addr       0x4f49535345535f54                  0x4f49535345535f54
-```
-
-`x0` is the ASCII text `P_SESSIO...`, i.e. bytes of the upload-progress field name being used as a pointer:
-a corrupted linked list, in the abort path. 8.4.26 does **not** do this when no debugger is attached - it
-discloses and returns a cookie. So this fault is caused by **stopping the worker inside the request**, not
-by the build, and any stack obtained that way is worthless as evidence.
-
-What is still true, from container logs with no debugger involved:
-
-- 8.4.26 completes the disclosure under the same spec;
-- 8.5.11 logs `child pid N exit signal Segmentation fault (11)` and returns nothing.
-
-So the difference is real, and its cause is currently **unattributed**. The lesson is the same class as
-item 10 in `HISTORY.md` (the instrument's stream is not the event): attaching a debugger changes the
-timing of a request that depends on allocation order.
-
-**How to get the cause without perturbing the request:** a post-mortem from a core file. `ulimit -c` and
-`kernel.core_pattern` are host-wide, so the cleanest version is to run the target with a core-absolute
-pattern, let the worker die on its own, and read the backtrace from the core - no attach, no stop, no
-observer effect. Until that is done, the honest statement is: the forge lands, the request dies, and why
-is not yet known.
+What is left is a well-defined question rather than a mystery: **at which page, and at which point in the
+request, does the 511-page value land on 8.5.11**. The instrument for it is a breakpoint on
+`php_url_encode` that only counts hits and prints `$x0`/`$x1` - no memory scan, so the worker is stopped
+for microseconds - combined with a page sweep across the whole chunk instead of four points.
 
 **Also measured:** `main - idchunk = 0x1000000` on 8.5.11 (against `0x400000` on 8.4.26). That number turns
 the disclosed chunk into the main chunk, so it needs confirming over several fresh containers once a leak
 exists.
 
-Instruments added by this attempt, all kept:
-
-- `gdb/a1_id_state.gdb` - is the string under `PS(id)` intact after arming;
-- `gdb/b1_id_page.gdb` - the id page, plus every chunk around it that carries the value marker;
-- `gdb/b1_page_finder.gdb` - where the encoder reads from, when it is reached at all.
 
 ## Limits
 
