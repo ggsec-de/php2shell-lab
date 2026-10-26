@@ -114,37 +114,11 @@ val[] = 32 hex characters + NUL     <- intact on both
 
 So both builds leave a *readable* `zend_string` under the dangling pointer, one page apart.
 
-**The disclosure does not transfer.** With the 8.4.26 spec (`G:511:0x137*14,G:400:0x137,X:900`) the request
-dies before the encoder ever runs:
-
-```
-#0 ps_close_files   #1 ps_open_files   #2 php_session_initialize
-#3 php_session_rfc1867_callback   #4 rfc1867_post_handler   #5 sapi_handle_post
-```
-
-That stack is the explanation: `php_session_initialize` is called from inside the upload-progress callback,
-i.e. **at the start of body parsing**, and it dereferences `PS(id)` through `ps_open_files -> ps_close_files`.
-On 8.4.26 the page the spec forges is the page the id lives on, so that dereference reads our bytes. On
-8.5.11 the id is one page lower (`0x136` against `0x137`), so the forged header misses it and the fillers
-overwrite the real string header instead.
-
-Measured with `gdb/b1_id_page.gdb` (breakpoint on `ps_close_files`, then scan for the value marker):
-
-| spec | result |
-| --- | --- |
-| `G:511:0x137*14,...` | no response; marker **not** in the id chunk, not in +/-16 chunks (32 MiB) |
-| `G:511:0x136*14,...` | no response; same |
-| `G:510:0x136*14,...` | `200 OK`, 195 bytes, **no OOM at all** |
-
-The middle row is the informative one: moving the header onto the id page is not enough, because the
-*value itself* is not in the id chunk. `G:511` means "start at page 1 of the chunk and cover 511 pages", so
-it only works if that allocation returns the chunk A1 freed. On 8.5.11 it does not: the earlier parts of the
-request consume it first, and `G:510` shows the value then never reaches the ceiling at all.
-
-**The next lever** is therefore not the header page but the *order of allocations* in the disclosure
-request, so that the 511-page value is the allocation that returns to the freed chunk. The knobs are
-`--prefix-count` / `--prefix-pages` and the number of `G` items; the instrument is `gdb/b1_id_page.gdb`,
-because it answers "is the marker in the id chunk" before any cookie exists.
+**The disclosure does not transfer.** With a spec that works on 8.4.26 the 8.5.11 target answers
+`200 OK` with a small body and no `Set-Cookie`, and sweeping the header page across `0x135..0x138` changes
+nothing. The request does not even fail: it completes, which says the forged header is not being reached at
+that point. Why, and where the value does land, is the open question - see the next subsection, which also
+records two harness mistakes that made earlier answers to it meaningless.
 
 ### What is actually established, with the harness corrected
 
