@@ -146,6 +146,43 @@ request, so that the 511-page value is the allocation that returns to the freed 
 `--prefix-count` / `--prefix-pages` and the number of `G` items; the instrument is `gdb/b1_id_page.gdb`,
 because it answers "is the marker in the id chunk" before any cookie exists.
 
+### Correction: the header page was the whole problem, and it is now fixed
+
+Reading the `zend_string` at the moment `ps_close_files` is entered - not by scanning for a marker, which
+does not exist for a `G` item because those values are filled with `A` - separates the two builds cleanly.
+With the 8.4.26 spec (`p = 0x137`) on 8.5.11 the id page still holds filler:
+
+```
+8.4.26  PS(id) page 0x137  gc=0x1600000000 (refcount=0 type=0x16) len=0xc8000   <- forged header
+8.5.11  PS(id) page 0x136  gc=0x4141414141414141 len=0x4141414141414141        <- plain 'A'
+```
+
+With `p = 0x136` the same read on 8.5.11 returns `gc=0x1600000000 ... len=0xc8000`, byte for byte what
+8.4.26 shows. So the page is the right one, the forge lands, and the value *is* in the id chunk - the
+earlier "marker not found" was an artefact of looking for a marker that `G` items never write.
+
+**What remains is a different obstacle, and it is not the length.** Even with the forge confirmed, the
+request still dies in `ps_close_files` (`ps_open_files <- php_session_initialize <-
+php_session_rfc1867_callback`), and shrinking the claimed length does not help:
+
+| `--fake-len` | result |
+| --- | --- |
+| `0xC8000` (800 KiB) | no response, fault in `ps_close_files` |
+| `0x80000` (512 KiB) | no response |
+| `0x8000` (32 KiB) | no response |
+
+So 8.5.11 is not choking on a long id. It faults while closing a session whose identifier it did not
+allocate, with a forged-but-otherwise-valid `zend_string` in place - a path 8.4.26 walks without complaint.
+The working hypothesis is that this is **the fix itself**: the session close/init path that the chain
+relied on was hardened, so the same dereference that used to be a benign read is now a fault. If that is
+right, porting to 8.5.11 is not a calibration exercise at all - the primitive has changed, and the chain
+would need a different way to reach the encoder.
+
+Distinguishing those two readings is the next experiment: a backtrace with the faulting instruction and
+`si_addr` on 8.5.11, compared against 8.4.26 in the same state. The instruments for it are already in
+`gdb/`: `b1_id_page.gdb` stops at the right moment, and `handle SIGSEGV stop print` plus `bt` names the
+frame.
+
 **Also measured:** `main - idchunk = 0x1000000` on 8.5.11 (against `0x400000` on 8.4.26). That number turns
 the disclosed chunk into the main chunk, so it needs confirming over several fresh containers once a leak
 exists.

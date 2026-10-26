@@ -29,6 +29,13 @@ def q(inf, addr):
     return int.from_bytes(inf.read_memory(addr, 8).tobytes(), "little")
 
 
+def read(inf, addr, size):
+    try:
+        return inf.read_memory(addr, size).tobytes()
+    except Exception:
+        return None
+
+
 class IdPage(gdb.Breakpoint):
     def stop(self):
         inf = gdb.selected_inferior()
@@ -45,13 +52,37 @@ class IdPage(gdb.Breakpoint):
         chunk = psid & ~(CHUNK - 1)
         print("[id] PS(id)=%#x  chunk=%#x  page=%#x" % (psid, chunk, (psid & (CHUNK - 1)) >> 12))
 
+        # Before anything else: is the string even readable at this moment? If it is not, the crash is
+        # not about geometry at all - the chunk was unmapped between the arming and this request.
+        head = read(inf, psid, 0x40)
+        if head is None:
+            print("[id] PS(id) is UNREADABLE here -> the chunk was unmapped (or never mapped)")
+            print("[id] => the fault is not a geometry problem; the body's own allocations killed it")
+            return True
+        gc = int.from_bytes(head[:8], "little")
+        ln = int.from_bytes(head[0x10:0x18], "little")
+        val = head[0x18:0x38]
+        printable = sum(1 for b in val if 32 <= b < 127)
+        print("[id] readable: gc=%#x (refcount=%d type=%#x) len=%#x  val=%r (%d/%d printable)"
+              % (gc, gc & 0xFFFFFFFF, (gc >> 32) & 0xFFFFFFFF, ln, val, printable, len(val)))
+        print("[id] => %s" % ("still a plausible id string"
+                              if ln <= 128 and printable > len(val) * 0.75
+                              else "not a plausible id string any more"))
+
+        def marker_pages(blob):
+            out = []
+            pos = blob.find(MARKER)
+            while pos >= 0:
+                out.append(pos >> 12)
+                pos = blob.find(MARKER, pos + 8)
+            return out
+
         try:
             blob = inf.read_memory(chunk, CHUNK).tobytes()
         except Exception as exc:
             print("[id] chunk unreadable: %s" % exc)
             return True
-        pages = [off >> 12 for off in range(0, len(blob) - len(MARKER), 8)
-                 if blob[off:off + len(MARKER)] == MARKER]
+        pages = marker_pages(blob)
         if pages:
             print("[id] value marker in this chunk: first=%#x last=%#x count=%d"
                   % (pages[0], pages[-1], len(pages)))
@@ -61,26 +92,25 @@ class IdPage(gdb.Breakpoint):
         else:
             print("[id] value marker is NOT in the stale-id chunk")
 
-        # Where does it land instead? Chunks are mmap'd contiguously, so scan the neighbourhood and
-        # report the distance in chunks - that is the number a filler parameter has to move.
+        # Where does it land instead? Chunks are contiguous, so scan outwards and report the distance
+        # in chunks - that is the number the allocation order has to move.
         found = []
-        for delta in list(range(-16, 0)) + list(range(1, 17)):
+        for delta in list(range(-48, 0)) + list(range(1, 49)):
             other = chunk + delta * CHUNK
             try:
                 other_blob = inf.read_memory(other, CHUNK).tobytes()
             except Exception:
                 continue
-            hits = [off >> 12 for off in range(0, len(other_blob) - len(MARKER), 8)
-                    if other_blob[off:off + len(MARKER)] == MARKER]
+            hits = marker_pages(other_blob)
             if hits:
                 found.append((delta, hits[0], hits[-1], len(hits)))
         if found:
-            print("[id] marker found in neighbouring chunks (+/-16 chunks):")
+            print("[id] marker found in neighbouring chunks (+/-48):")
             for delta, first, last, count in found:
                 print("[id]   %+d chunk(s): pages %#x..%#x, %d markers"
                       % (delta, first, last, count))
         else:
-            print("[id] marker not in +/-16 chunks either")
+            print("[id] marker not in +/-48 chunks either")
         return True
 
 
