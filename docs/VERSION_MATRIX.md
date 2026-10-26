@@ -162,26 +162,47 @@ With `p = 0x136` the same read on 8.5.11 returns `gc=0x1600000000 ... len=0xc800
 earlier "marker not found" was an artefact of looking for a marker that `G` items never write.
 
 **What remains is a different obstacle, and it is not the length.** Even with the forge confirmed, the
-request still dies in `ps_close_files` (`ps_open_files <- php_session_initialize <-
-php_session_rfc1867_callback`), and shrinking the claimed length does not help:
+request still dies, and shrinking the claimed length does not help:
 
 | `--fake-len` | result |
 | --- | --- |
-| `0xC8000` (800 KiB) | no response, fault in `ps_close_files` |
+| `0xC8000` (800 KiB) | no response |
 | `0x80000` (512 KiB) | no response |
 | `0x8000` (32 KiB) | no response |
 
-So 8.5.11 is not choking on a long id. It faults while closing a session whose identifier it did not
-allocate, with a forged-but-otherwise-valid `zend_string` in place - a path 8.4.26 walks without complaint.
-The working hypothesis is that this is **the fix itself**: the session close/init path that the chain
-relied on was hardened, so the same dereference that used to be a benign read is now a fault. If that is
-right, porting to 8.5.11 is not a calibration exercise at all - the primitive has changed, and the chain
-would need a different way to reach the encoder.
+### A retraction: the `ps_close_files` stack was an artefact
 
-Distinguishing those two readings is the next experiment: a backtrace with the faulting instruction and
-`si_addr` on 8.5.11, compared against 8.4.26 in the same state. The instruments for it are already in
-`gdb/`: `b1_id_page.gdb` stops at the right moment, and `handle SIGSEGV stop print` plus `bt` names the
-frame.
+An earlier version of this section blamed `ps_close_files` (`ps_open_files <- php_session_initialize <-
+php_session_rfc1867_callback`) and called it the obstacle. That attribution does not survive its own
+control. Catching the SIGSEGV with gdb attached - `handle SIGSEGV stop print`, then `bt` - produces
+byte-identical results on **both** builds:
+
+```
+                       8.5.11                    8.4.26
+pc            ps_close_files+84  ldr w1,[x0,#4]   ps_close_files+84  ldr w1,[x0,#4]
+x0            0x4f49535345535f50                  0x4f49535345535f50
+si_addr       0x4f49535345535f54                  0x4f49535345535f54
+```
+
+`x0` is the ASCII text `P_SESSIO...`, i.e. bytes of the upload-progress field name being used as a pointer:
+a corrupted linked list, in the abort path. 8.4.26 does **not** do this when no debugger is attached - it
+discloses and returns a cookie. So this fault is caused by **stopping the worker inside the request**, not
+by the build, and any stack obtained that way is worthless as evidence.
+
+What is still true, from container logs with no debugger involved:
+
+- 8.4.26 completes the disclosure under the same spec;
+- 8.5.11 logs `child pid N exit signal Segmentation fault (11)` and returns nothing.
+
+So the difference is real, and its cause is currently **unattributed**. The lesson is the same class as
+item 10 in `HISTORY.md` (the instrument's stream is not the event): attaching a debugger changes the
+timing of a request that depends on allocation order.
+
+**How to get the cause without perturbing the request:** a post-mortem from a core file. `ulimit -c` and
+`kernel.core_pattern` are host-wide, so the cleanest version is to run the target with a core-absolute
+pattern, let the worker die on its own, and read the backtrace from the core - no attach, no stop, no
+observer effect. Until that is done, the honest statement is: the forge lands, the request dies, and why
+is not yet known.
 
 **Also measured:** `main - idchunk = 0x1000000` on 8.5.11 (against `0x400000` on 8.4.26). That number turns
 the disclosed chunk into the main chunk, so it needs confirming over several fresh containers once a leak
