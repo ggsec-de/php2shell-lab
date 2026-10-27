@@ -2,20 +2,22 @@
 /*
  * Read-only build check for ggsec.de.
  *
- * Answers two questions and changes nothing:
- *   1. which PHP build is serving the site (so the var_destroy UAF range can be checked
- *      without running anything that crashes);
- *   2. whether the site's own code contains unserialize() call sites, which is the
- *      precondition the bug needs. Finding a call site is not a finding on its own --
- *      what matters is whether request data can reach it.
+ * Answers three questions and changes nothing:
+ *   1. which PHP build is serving the site;
+ *   2. which plugins and themes are installed, with versions;
+ *   3. where the site's own code calls unserialize(), and which of those files also
+ *      touch request superglobals -- that pairing is the only precondition the
+ *      var_destroy UAF needs that a hosting plan cannot supply by itself.
  *
- * Upload under a random name, set $TOKEN below, open with ?k=<token>, delete it after.
+ * Finding a call site is not a finding. What matters is whether request data reaches it.
+ *
+ * Upload under a random name, set $TOKEN, open with ?k=<token>, delete it after.
  * No writes, no shell, no network, no output of passwords or keys.
  */
 
 declare(strict_types=1);
 
-$TOKEN = 'eowidm4932849327912124';
+$TOKEN = 'CHANGE-ME-before-upload';
 
 if (!isset($_GET['k']) || !hash_equals($TOKEN, (string) $_GET['k'])) {
     http_response_code(404);
@@ -39,6 +41,20 @@ function section(string $title): void
     echo "\n== ", $title, " ", str_repeat('=', max(0, 58 - strlen($title))), "\n";
 }
 
+function header_value(string $file, string $field): ?string
+{
+    $source = @file_get_contents($file, false, null, 0, 8192);
+    if ($source === false) {
+        return null;
+    }
+    if (preg_match('/^[ \t\/*#@]*' . preg_quote($field, '/') . ':\s*(.+)$/mi', $source, $m)) {
+        return trim($m[1]);
+    }
+    return null;
+}
+
+/* ---------------------------------------------------------------- build --- */
+
 section('PHP build');
 row('PHP_VERSION', PHP_VERSION);
 row('PHP_VERSION_ID', PHP_VERSION_ID);
@@ -48,8 +64,8 @@ row('Zend Engine', zend_version());
 row('thread safety', defined('ZEND_THREAD_SAFE') && ZEND_THREAD_SAFE ? 'ZTS' : 'NTS');
 row('int size', PHP_INT_SIZE * 8 . '-bit');
 row('unserialize() available', function_exists('unserialize'));
+row('this file', __FILE__);
 row('loaded ini file', php_ini_loaded_file() ?: '(none)');
-row('scanned ini files', php_ini_scanned_files() ?: '(none)');
 
 section('Limits and session settings');
 foreach ([
@@ -58,51 +74,132 @@ foreach ([
     'upload_max_filesize',
     'max_file_uploads',
     'max_input_vars',
-    'max_input_time',
     'max_execution_time',
     'session.save_handler',
     'session.serialize_handler',
     'session.use_strict_mode',
-    'session.use_cookies',
     'session.upload_progress.enabled',
     'session.upload_progress.cleanup',
-    'session.upload_progress.prefix',
-    'session.upload_progress.name',
 ] as $key) {
     row($key, ini_get($key));
 }
 row('opcache.enable', function_exists('opcache_get_status') ? ini_get('opcache.enable') : 'extension absent');
-row('opcache.preload', ini_get('opcache.preload') ?: '(none)');
+row('disable_functions', array_filter(array_map('trim', explode(',', (string) ini_get('disable_functions')))));
 
-$disabled = array_filter(array_map('trim', explode(',', (string) ini_get('disable_functions'))));
-row('disable_functions', $disabled);
+/* ----------------------------------------------------------- site root --- */
 
-section('WordPress');
-if (function_exists('get_bloginfo')) {
-    row('core version', get_bloginfo('version'));
-    $plugins = (array) get_option('active_plugins', []);
-    row('active plugins', count($plugins));
-    foreach ($plugins as $plugin) {
-        echo '  - ', $plugin, "\n";
+section('Site root');
+
+$siteRoot = null;
+$probe = __DIR__;
+for ($depth = 0; $depth < 5; $depth++) {
+    if (is_file($probe . '/wp-config.php')) {
+        $siteRoot = $probe;
+        break;
     }
-    $theme = wp_get_theme();
-    row('theme', $theme->get('Name') . ' ' . $theme->get('Version'));
-    row('REST users endpoint', get_option('permalink_structure') !== '' ? 'permalinks on' : 'plain');
-} else {
-    row('WordPress loaded', false);
+    $parent = dirname($probe);
+    if ($parent === $probe) {
+        break;
+    }
+    $probe = $parent;
+}
+row('wp-config.php found', $siteRoot ?? 'no (searched 5 levels up from this file)');
+
+$contentCandidates = [];
+if ($siteRoot !== null) {
+    $contentCandidates[] = $siteRoot . '/wp-content';
+}
+$contentCandidates[] = __DIR__ . '/wp-content';
+$contentCandidates[] = dirname(__DIR__) . '/wp-content';
+
+$contentRoot = null;
+foreach ($contentCandidates as $candidate) {
+    if (is_dir($candidate)) {
+        $contentRoot = $candidate;
+        break;
+    }
+}
+row('wp-content', $contentRoot ?? 'not found');
+if ($contentRoot === null) {
+    row('tried', $contentCandidates);
 }
 
-section('unserialize() call sites under wp-content');
-$root = defined('WP_CONTENT_DIR') ? WP_CONTENT_DIR : dirname(__DIR__) . '/wp-content';
+/* -------------------------------------------------------- plugin/theme --- */
+
+if ($contentRoot !== null) {
+    section('Installed plugins');
+    $pluginDir = $contentRoot . '/plugins';
+    $found = 0;
+    foreach ((array) @scandir($pluginDir) as $entry) {
+        if (!is_string($entry) || $entry === '.' || $entry === '..') {
+            continue;
+        }
+        $path = $pluginDir . '/' . $entry;
+        if (is_file($path) && substr($entry, -4) === '.php') {
+            $name = header_value($path, 'Plugin Name');
+            if ($name !== null) {
+                $found++;
+                printf("  %-34s %-10s %s\n", basename($entry, '.php'), header_value($path, 'Version') ?? '?', $name);
+            }
+            continue;
+        }
+        if (!is_dir($path)) {
+            continue;
+        }
+        foreach ((array) @scandir($path) as $inner) {
+            if (!is_string($inner) || substr($inner, -4) !== '.php') {
+                continue;
+            }
+            $name = header_value($path . '/' . $inner, 'Plugin Name');
+            if ($name === null) {
+                continue;
+            }
+            $found++;
+            printf("  %-34s %-10s %s\n", $entry, header_value($path . '/' . $inner, 'Version') ?? '?', $name);
+            break;
+        }
+    }
+    row('plugins with headers', $found);
+
+    section('Installed themes');
+    $themeDir = $contentRoot . '/themes';
+    $found = 0;
+    foreach ((array) @scandir($themeDir) as $entry) {
+        if (!is_string($entry) || $entry === '.' || $entry === '..' || !is_dir($themeDir . '/' . $entry)) {
+            continue;
+        }
+        $style = $themeDir . '/' . $entry . '/style.css';
+        if (!is_file($style)) {
+            continue;
+        }
+        $name = header_value($style, 'Theme Name');
+        if ($name === null) {
+            continue;
+        }
+        $found++;
+        printf("  %-34s %-10s %s\n", $entry, header_value($style, 'Version') ?? '?', $name);
+    }
+    row('themes with headers', $found);
+}
+
+/* ------------------------------------------------------- unserialize ---- */
+
+section('unserialize() call sites');
+
 $patterns = [
     'unserialize(' => '/\bunserialize\s*\(/i',
     'maybe_unserialize(' => '/\bmaybe_unserialize\s*\(/i',
-    'unserialize(base64_decode' => '/unserialize\s*\(\s*(?:base64_decode|stripslashes|urldecode|gzinflate|gzuncompress)/i',
+    'wrapped' => '/unserialize\s*\(\s*(?:base64_decode|stripslashes|urldecode|gzinflate|gzuncompress|hex2bin)/i',
 ];
+$superglobal = '/\$_(?:GET|POST|COOKIE|REQUEST|FILES)\b/';
+
 $counts = array_fill_keys(array_keys($patterns), 0);
+$counts['files also reading superglobals'] = 0;
 $hits = [];
+$exposed = [];
 $files = 0;
 $maxHits = 120;
+$maxExposed = 40;
 
 $limit = (int) ini_get('max_execution_time');
 $budget = $limit > 0 ? max(5, $limit - 5) : 25;
@@ -110,9 +207,9 @@ $budget = min($budget, 25);
 $started = microtime(true);
 $complete = true;
 
-if (is_dir($root)) {
+if ($contentRoot !== null) {
     $iterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS)
+        new RecursiveDirectoryIterator($contentRoot, FilesystemIterator::SKIP_DOTS)
     );
     foreach ($iterator as $file) {
         if (microtime(true) - $started > $budget) {
@@ -127,33 +224,51 @@ if (is_dir($root)) {
         if ($source === false) {
             continue;
         }
+        $relative = str_replace($contentRoot, 'wp-content', $file->getPathname());
+        $hasUnserialize = false;
         foreach ($patterns as $name => $regex) {
             if (!preg_match_all($regex, $source, $m)) {
                 continue;
             }
+            $hasUnserialize = true;
             $counts[$name] += count($m[0]);
-            foreach ($m[0] as $occurrence) {
-                if (count($hits) >= $maxHits) {
-                    continue;
-                }
-                $hits[] = str_replace($root, 'wp-content', $file->getPathname()) . '  [' . $name . ']';
+            if (count($hits) < $maxHits) {
+                $hits[] = $relative . '  [' . $name . ']';
+            }
+        }
+        if ($hasUnserialize && preg_match($superglobal, $source)) {
+            $counts['files also reading superglobals']++;
+            if (count($exposed) < $maxExposed) {
+                $exposed[] = $relative;
             }
         }
     }
+
     row('php files scanned', $files);
-    row('scan completed', $complete ? 'yes' : 'NO - budget ' . $budget . 's reached');
+    row('scan completed', $complete ? 'yes' : 'NO - budget ' . $budget . 's reached, re-run to continue');
     foreach ($counts as $name => $count) {
         row($name, $count);
     }
-    echo "\n";
-    if ($hits === []) {
-        echo "  no call sites found\n";
+
+    echo "\n-- files that unserialize AND read a superglobal (eyeball these) --\n";
+    if ($exposed === []) {
+        echo "   none\n";
     } else {
-        echo implode("\n", array_unique($hits)), "\n";
-        echo count($hits) >= $maxHits ? "\n  (list truncated at {$maxHits})\n" : '';
+        echo '   ', implode("\n   ", $exposed), "\n";
+        if (count($exposed) >= $maxExposed) {
+            echo '   (truncated at ', $maxExposed, ")\n";
+        }
     }
-} else {
-    row('wp-content', 'not found at ' . $root);
+
+    echo "\n-- every call site --\n";
+    if ($hits === []) {
+        echo "   none\n";
+    } else {
+        echo '   ', implode("\n   ", array_unique($hits)), "\n";
+        if (count($hits) >= $maxHits) {
+            echo '   (truncated at ', $maxHits, ")\n";
+        }
+    }
 }
 
 echo "\nDone. Delete this file now.\n";
