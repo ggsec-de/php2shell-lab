@@ -261,7 +261,9 @@ properties of the source and the allocator, not of the build. Reading the header
 ### 8.2 Bulk by extraction — per build, but scriptable
 
 Addresses inside the binary do move, and must be read from each artifact. They are offsets **relative to the
-module's load base**, so they are ASLR-independent and a single base leak is sufficient:
+module's load base**, so they are ASLR-independent: one base leak relocates all three, and no fresh leak is
+needed per build. That says nothing about how easy the leak is — see section 7 item 3, where it remains the
+open question.
 
 | image | text symbols in `libphp.so` | `zif_system` | `zval_ptr_dtor` | `zend_hash_destroy` |
 | --- | --- | --- | --- | --- |
