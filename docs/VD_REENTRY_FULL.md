@@ -238,23 +238,89 @@ None of this is done. The reason is not capability but timing: every released PH
 patched release exists, so a working chain today has no defensive use that the crash and the controlled
 pointer do not already provide.
 
-## 8. What we would still measure, if asked
+## 8. Offsets in bulk: what can and cannot be harvested per release
 
-- **Reliability:** 100 runs at length 8160 on a stock build, count crashes, confirm the address is identical.
+The question comes up because a chain needs numbers that differ per build. Three different quantities are
+being conflated when people ask for "the offset range across released versions", and only two of the three
+can be obtained in bulk.
+
+### 8.1 Bulk by derivation — no per-version work at all
+
+Engine geometry follows compile-time constants, not addresses:
+
+| quantity | where it comes from | varies per release? |
+| --- | --- | --- |
+| `VAR_ENTRIES_MAX` = 1018 | `var_unserializer.re` | no, fixed since 7.0 |
+| `sizeof(zval)` = 16 | Zend ABI (64-bit, NTS) | no |
+| entries chain block = 8160 B | 1018 × 8 + header, page-multiple | no |
+| reclaim window 3072..8160 | Zend MM size classes | no |
+
+That is why one measurement transferred to fourteen releases without repeating anything: the numbers are
+properties of the source and the allocator, not of the build. Reading the header once is enough.
+
+### 8.2 Bulk by extraction — per build, but scriptable
+
+Addresses inside the binary do move, and must be read from each artifact. They are offsets **relative to the
+module's load base**, so they are ASLR-independent and a single base leak is sufficient:
+
+| image | text symbols in `libphp.so` | `zif_system` | `zval_ptr_dtor` | `zend_hash_destroy` |
+| --- | --- | --- | --- | --- |
+| `php:8.4.26-apache` | 15 872 | `0x465370` | `0x65eb60` | `0x6138f0` |
+| `php:8.4.27-apache` | 15 929 | `0x46ad70` | `0x66a620` | `0x61ec90` |
+| `php:8.3.36-apache` | 12 921 | `0x3b2a00` | `0x4a9510` | `0x4bff10` |
+| `php:8.5.12-apache` | 18 095 | `0x59fae0` | `0x7c11a0` | `0x775050` |
+
+Measured 2026-10-27 by extracting the module from each image and running `nm` over it. Four releases, one
+loop, a few minutes; the same loop covers every published image. No execution of the target is involved.
+
+Two things this table shows that matter more than the numbers:
+
+- **A patch release moves the offsets.** 8.4.26 → 8.4.27 shifts `zif_system` by `+0x5A00`. An offset is
+  never reusable across patch levels, which is why "ranges" is the wrong mental model — there is a value
+  per artifact, and it must be looked up per artifact.
+- **SAPI and packaging matter.** The `php` CLI in the same image is stripped: zero text symbols, so nothing
+  resolves. The `libphp.so` next to it keeps its symbol table. A distro build (our own host runs
+  `8.4.27-nmm1`) is a different artifact from the official image and carries different numbers again.
+
+### 8.3 Not bulk — requires a probe per build
+
+The offsets that a chain actually needs most are the ones no symbol table can give:
+
+- **Where inside the reclaimed block the forged `zval` must sit.**
+- **Which page the dangling slot lands on** — `0x137` on 8.4.26, `0x136` on 8.5.11, and the difference is
+  traceable to `zend_string_init` → `zend_string_copy` changing sid ownership, not to anything mechanical.
+- **Whether the reclaim lands deterministically** at that offset under the default allocator.
+
+These depend on runtime heap state and on build-specific code paths. They are obtained by running a probe
+under gdb against each build, which is what `gdb/b1_page_finder.gdb` and `gdb/b1_id_page.gdb` do. This is
+the part of the work that genuinely does not scale to "all releases", and it is why we report a controlled
+pointer rather than a chain: the bulk-able half was never the hard half.
+
+## 9. What we would still measure, if asked
+
 - **The `0x4a` byte:** dump the eight bytes at the faulting read's source address and identify the offset.
+  Still the one unresolved detail; see section 4.3.
 - **Zend MM mechanics:** which bin the 8160-byte block belongs to, and whether a string of that size is the
   only allocation that reclaims it (a size sweep already shows 8161+ no longer reclaims).
-- **8.4/8.3:** ASAN builds of those branches, to state the affected range with measurements rather than
-  inference from 8.2.34/8.2.35 and 8.5.12.
+- **ASAN on 8.4 and 8.3 specifically:** the stock sweep covers all fourteen releases, but the sanitizer
+  build exists only for 8.5.12, 8.2.35 and 8.2.34, so the "same faulting line" claim rests on three builds.
+- **One image per line:** 7.0.33, 7.1.33, 7.2.34, 7.3.33, 7.4.33, 8.0.30, 8.1.34, 8.2.34, 8.2.35, 8.3.36,
+  8.4.26, 8.4.27, 8.5.11, 8.5.12 — a second point on 8.2 and 8.4 only. Untested patch levels are untested.
 
-## 9. Our own measurement limits
+Closed since this section was written: reliability (100/100 at length 8160, identical address), and the
+affected range at the release level (fourteen releases, 5.6.40 clean).
 
-- ASAN images are **aarch64**; the stock run is `php:8.5.12-cli` **aarch64**. Nothing here is x86-64.
-- The stock sweep is one run per length; no reliability figure.
+## 10. Our own measurement limits
+
+- The ASAN images are **aarch64**; the stock sweep ran on aarch64 as well. The x86-64 work in this repository
+  is php2shell, not this bug, so nothing here has been reproduced on x86-64.
+- ~~The stock sweep is one run per length; no reliability figure.~~ Closed: 100 consecutive runs at 8160.
 - We did not inspect `var.c` for a second reachable path into the same walk — we confirmed the one the
   publication describes.
 - We did not test whether `allowed_classes` or an application-side `unserialize` wrapper changes anything;
   the trigger assumes a plain `unserialize()` on attacker data, which is the premise the publication states.
+- Section 8.2 samples official Docker images. Distro packages are separate artifacts with their own offsets;
+  none were extracted.
 
 ## Reproduce
 
