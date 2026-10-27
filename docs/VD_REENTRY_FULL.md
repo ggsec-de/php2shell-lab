@@ -177,17 +177,33 @@ deterministic way. **What it is not:** a chain. There is no leak here, no fake z
 | check | result |
 | --- | --- |
 | `php/php-src` commit `08f4b64e0ae6` | "Fix GH-24373: serialize() context reused by destructors during teardown", 2026-10-22 |
+| fixing PR | #24452 by `devnexen`, closed 2026-10-22T19:28, label `Extension: standard`, **no milestone** |
+| issue | #24373 by `janhelke`, closed 2026-10-22T19:28, **no milestone**, 0 comments |
 | files touched | `ext/standard/var.c`, `ext/standard/var_unserializer.re`, `NEWS` |
 | tests added | `ext/standard/tests/serialize/gh24373.phpt`, `gh24373_unserialize.phpt` |
-| tests present in tag `php-8.5.12` | **no** — 27 701 files in the tag, neither test |
-| tests present on `master` | yes |
-| `php-8.5.13` tag | does not exist yet |
+| tests on `master` | yes |
+| tests on `PHP-8.5` | **yes** |
+| tests on `PHP-8.4` | **yes** |
+| tests on `PHP-8.3` | no |
+| tests on `PHP-8.2` | no |
+| tests in tag `php-8.5.12` | **no** — 27 701 files in the tag, neither test |
+| tests in tag `php-8.4.27` | no |
+| release tags `php-8.5.13`, `php-8.4.28`, `php-8.3.37`, `php-8.2.36` | none exist yet (checked 2026-10-27) |
 | reported to `security@php.net` | 2026-10-26, no reply yet |
 
-So "not fixed in 8.5.12" is accurate, and "ships in 8.5.13" is a plan rather than a fact. Nothing here says
-whether the fix is intended for the 8.2/8.3/8.4 branches, which is the question we put to the PHP team on
-2026-10-26; the reply and the resulting backport position belong in this table, and `README.md` and
-`NOTICE.md` should quote it rather than guess.
+Two corrections to what this section said before, both ours to own:
+
+1. **We checked `master` against the release tag and concluded "backport undecided". That was
+   under-verified.** Checking the branches as well shows the fix was merged to `PHP-8.5` *and*
+   `PHP-8.4` on 2026-10-22, the same day it landed on `master`. So 8.4 is not waiting on a decision:
+   the next 8.4 patch release carries it. The genuinely open question is narrower — **8.3 and 8.2 do
+   not have the fix**, and 8.3 is in security support until December 2027.
+2. **The disclosure email says 8.4 has "no release to wait for". That is wrong** and would be visible
+   to anyone who checks the branch. It went out that way; if PHP replies, the first thing to do is
+   correct it rather than let it stand.
+
+So the accurate statement on 2026-10-27 is: the fix is merged on 8.5 and 8.4, no release contains it
+yet, and 8.3/8.2 have nothing on the branch.
 
 ## 6. Prior art and what the publishing party did and did not show
 

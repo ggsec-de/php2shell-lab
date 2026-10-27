@@ -76,10 +76,17 @@ matters.
 | --- | --- |
 | `php/php-src` commit `08f4b64e0ae6` | "Fix GH-24373: serialize() context reused by destructors during teardown", 2026-10-22, touches `var.c` and `var_unserializer.re`, adds `gh24373.phpt` and `gh24373_unserialize.phpt` |
 | tests present in tag `php-8.5.12` | **no** — 27 701 files, neither test |
-| tests present on `master` | yes |
+| tests present on `master`, `PHP-8.5`, `PHP-8.4` | yes — the fix was merged to all three on 2026-10-22 |
+| tests present on `PHP-8.3`, `PHP-8.2` | no |
 
-So "not fixed in 8.5.12, fix ships in 8.5.13" is accurate. The repository also credits the prior reporter
-(`janhelke`, GH-24373) rather than claiming discovery, which is the honest way round.
+So "not fixed in 8.5.12, fix ships in the next 8.5" is accurate, and 8.4 is patched on the branch too.
+The repository also credits the prior reporter (`janhelke`, GH-24373) rather than claiming discovery,
+which is the honest way round.
+
+As of 2026-10-27 the publishing party has moved on from this finding: they now claim a public-URL RCE
+with receipts and raised the CVSS to 9.8, and their newest material is an INI-parsing UAF
+(`fa_jammy.sh`, "stage-2 INI-UAF pre-RINIT arm"), not the serializer. Their commit log also records that
+the report went to `sec@php.net` **after** the public release.
 
 ## 2a. It is not crash-only: the pointer is controlled on a stock build
 

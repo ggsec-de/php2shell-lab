@@ -113,14 +113,19 @@ shorter signature — the email file is authoritative, and it is the one that wa
 | date | event | outcome |
 | --- | --- | --- |
 | 2026-10-26 | sent | — |
+| 2026-10-27 | found our own error in the sent text | the fix is merged on `PHP-8.4` as well as `PHP-8.5`; the email's claim that 8.4 has "no release to wait for" is wrong. Correct it in the first reply rather than leaving it |
+
+Correction to carry into any reply: the fix is on `master`, `PHP-8.5` and `PHP-8.4` since 2026-10-22;
+`PHP-8.3` and `PHP-8.2` do not have it; no release tag contains it yet. So the backport question is about
+**8.3 and 8.2 only**. See `docs/VD_REENTRY_FULL.md` section 5.
 
 Record their reply here and in `docs/VD_REENTRY_FULL.md` section 5, so `README.md` and `NOTICE.md` can state
 the backport position as fact rather than assumption.
 
 What each answer changes:
 
-1. **backport to 8.2/8.3/8.4** — decides whether the exposed range reads as "wait for 8.5.13" or "seven
-   lines with no release to wait for".
+1. **backport to 8.3/8.2** — 8.4 and 8.5 already have the fix on the branch, so the exposed range that
+   has nothing to wait for is 8.3 and 8.2, not "seven lines with no release".
 2. **further material wanted** — decides whether we hand the probes over as-is or re-cut them for them.
 3. **hold the write-up** — stated default is hold; no reply does not change it.
 
