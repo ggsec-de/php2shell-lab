@@ -15,7 +15,7 @@
 
 declare(strict_types=1);
 
-$TOKEN = 'CHANGE-ME-before-upload';
+$TOKEN = 'eowidm4932849327912124';
 
 if (!isset($_GET['k']) || !hash_equals($TOKEN, (string) $_GET['k'])) {
     http_response_code(404);
@@ -104,11 +104,21 @@ $hits = [];
 $files = 0;
 $maxHits = 120;
 
+$limit = (int) ini_get('max_execution_time');
+$budget = $limit > 0 ? max(5, $limit - 5) : 25;
+$budget = min($budget, 25);
+$started = microtime(true);
+$complete = true;
+
 if (is_dir($root)) {
     $iterator = new RecursiveIteratorIterator(
         new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS)
     );
     foreach ($iterator as $file) {
+        if (microtime(true) - $started > $budget) {
+            $complete = false;
+            break;
+        }
         if (!$file->isFile() || strtolower($file->getExtension()) !== 'php') {
             continue;
         }
@@ -131,6 +141,7 @@ if (is_dir($root)) {
         }
     }
     row('php files scanned', $files);
+    row('scan completed', $complete ? 'yes' : 'NO - budget ' . $budget . 's reached');
     foreach ($counts as $name => $count) {
         row($name, $count);
     }
