@@ -237,6 +237,24 @@ sudo gdb -q -batch -p "$(sudo pgrep -P "$(docker inspect -f '{{.State.Pid}}' p2s
      -x gdb/chain_state.gdb
 ```
 
+## Keeping the lab hosts in step
+
+The chains run on two machines — an aarch64 Kali box and an x86-64 WSL install — and neither has
+credentials for this private repository, so updates travel as an archive.
+
+```powershell
+.\tools\sync-to-kali.ps1 -DryRun      # what would land, nothing written
+.\tools\sync-to-kali.ps1              # copy, verify per file, install
+```
+
+The script builds a tar from the working tree, generates a SHA256 manifest inside it, uploads it, and
+runs `sha256sum -c` on the far side before `rsync` touches the destination, so a partial or corrupted
+transfer cannot leave a half-updated tree. It also asserts the installed file count, which is what
+caught a leading `~` reaching bash unexpanded (the tree had landed in a directory literally named `~`).
+
+Both hosts are checked at the time of writing: 67 files each, every hash matching the working copy, and
+three consecutive end-to-end runs on each — 3/3 on arm64, 3/3 on x86-64.
+
 ## Credit
 
 The bug class and the original pure-HTTP research are not ours. This repository is an independent

