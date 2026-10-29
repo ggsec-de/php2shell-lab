@@ -98,10 +98,32 @@ bash poc/chain.sh --workers 150 \
 `chain.sh` prints the leaked address set on every run; with ASLR each container gives a different
 `libphp`, `main`, `S` and `hsv`, and the chain still lands.
 
+Before A1 it runs `poc/preflight.py` (reachability, PHP version, front end, and — with `--probe
+/probe.php` — SAPI, ini and pool size) and stops on an incompatible target. After A1 it runs
+`poc/arming_gate.py`, which requires the `tried to allocate 4096` refusal before B1 is spent: a
+different size means the build charges its limits differently and the disclosure cannot work. On a
+target without a readable container log the gate exits `4` (unverified); `--allow-unverified`
+continues anyway. `--skip-preflight` skips the first gate.
+
+The gate prefers the container log over the response body and uses one or the other, never both: a body
+that happens to contain `4096` while the log names a 2 MiB refusal would otherwise be read as "armed",
+with the authoritative source cited as evidence for the opposite. When docker is not on `PATH`, or the
+log carries no allocation size, the gate says so rather than silently falling back.
+
+**A target that arms but cannot disclose.** On 8.5.11 the arming step reproduces exactly, and B1 then
+returns nothing, because `PS(id)` is handed to the encoder as a refcounted copy of someone else's string
+instead of a fresh object — `php_session_send_cookie` is never called, so there is nothing to leak. The
+gate passes and the chain fails one step later, which is misleading. Preflight therefore reports this
+build as `ARMING-ONLY` and exits `5`; `--allow-arming-only` accepts it, runs preflight, A1 and the gate,
+then stops with exit `6` and a message saying the arming instrument was verified and B1 was not
+attempted. Use it to validate the detector against a known-positive build, not as a chain attempt.
+
 ## Tools
 
 | file | role |
 |---|---|
+| `poc/preflight.py` | recon and hard gate: PHP version, front end/SAPI, ini, pool size; refuses an incompatible target |
+| `poc/arming_gate.py` | reads the A1 evidence and refuses B1 unless the failure is the 4096-byte encode-site refusal |
 | `poc/a1_arm.py` | A1 arming (also the tool that pinned the 4096 OOM site and page 0x137) |
 | `poc/b1_forge.py` | B1 builder: `--spec`, `--tag`, `--save-cookie`, narrow and wide windows |
 | `poc/decode_leak_cookie.py` | decoder: engine-faithful `+`/`%XX` handling, symbol subtraction, cluster voting |
@@ -121,10 +143,20 @@ is enough for `&ps_globals`, `&alloc_globals`, `&zval_ptr_dtor` and `&zif_system
 
 ## Limits
 
+The chain runs on one measured configuration: `php:8.4.26-apache`, prefork mod_php, one worker, no proxy
+in front, `memory_limit=128M`, `cleanup=On`. Every other configuration that was measured fails at a
+specific, named step — see the table in the [README](../README.md#how-often-this-actually-works). In short:
+8.4.27 and later do not arm, 8.5.11 arms without disclosing, FPM replaces the worker on bailout, and a
+proxy with the default 1 MiB body limit stops the arming request before PHP sees it.
+
+That is the number to quote to a client. Anything short of a proof file read out of their own environment
+is a compatibility estimate.
+
 - **Worker count.** Both configurations are covered: the single-worker lab (nothing to hold) and the
   stock MPM, where `--workers 150` first occupies `MaxRequestWorkers - 1` children with half-sent
   requests (`poc/hold_workers.py`) so every step lands on the same child. A target with a different
-  `MaxRequestWorkers` needs that number passed in.
+  `MaxRequestWorkers` needs that number passed in. On x86-64 the pinned stock-MPM run was 1/3 — the
+  free child rotates even with the sockets held.
 - **Configuration dependence.** The chain needs `session.upload_progress.cleanup=On` (default),
   `display_errors=Off`, an active `php.ini`, `memory_limit` 128M, and the exact `--big 78` arming
   shape. `--fillers 115` is layout-tuned: a different image moves `hsv`/`S` and needs a re-measure.

@@ -27,6 +27,7 @@ $walk = function ($value, $depth) use (&$walk, &$deepest, &$count) {
 $walk($_POST, 0);
 echo json_encode([
     'php' => PHP_VERSION,
+    'sapi' => php_sapi_name(),
     'pid' => getmypid(),
     'post_top_level' => count($_POST),
     'post_nodes' => $count,
@@ -39,6 +40,9 @@ echo json_encode([
     'memory_usage_real' => memory_get_usage(true),
     'memory_peak' => memory_get_peak_usage(),
     'memory_limit' => ini_get('memory_limit'),
+    'post_max_size' => ini_get('post_max_size'),
+    'display_errors' => ini_get('display_errors'),
+    'session.upload_progress.cleanup' => ini_get('session.upload_progress.cleanup'),
     'session_status' => session_status(),
     'max_input_vars' => ini_get('max_input_vars'),
     'max_multipart_body_parts' => ini_get('max_multipart_body_parts'),

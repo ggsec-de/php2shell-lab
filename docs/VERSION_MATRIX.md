@@ -339,8 +339,10 @@ point of that option and the pool is not.
 - The signature is not the chain. A `4096` says the arming step is reachable; it does not by itself
   prove disclosure or execution, which need addresses recalibrated for that build. The full chain was
   verified end-to-end on 8.4.26 (3/3) and, by the separate PoC, on 8.5.11 (3/3).
-- Stock `php:*-apache` images only, aarch64, single Apache child. No FPM row here (FPM cannot carry the
-  state across requests at all, see [FPM.md](FPM.md)), no x86_64, no distro packages, no opcache.
+- Stock `php:*-apache` images only, single Apache child. No FPM row here (FPM cannot carry the
+  state across requests at all, see [FPM.md](FPM.md)), no distro packages, no opcache. x86-64 reached
+  the same arming/disclosure/execution result on the same digest (3/3, own section above); the
+  layout constants stayed identical, only the chunk delta had to be derived.
 - "No OOM" is a statement about these three shapes and this ini. It is not a proof that no body
   exhausting a page can be built for these builds; it is the same class of evidence as the negative
   control, one instrument stronger because the positive control is on a different branch.

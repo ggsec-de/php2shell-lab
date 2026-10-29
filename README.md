@@ -21,7 +21,7 @@ Result on the tested target: `system()` runs as `www-data`.
 | what | result |
 |---|---|
 | single-worker baseline, fresh container per run | 3/3 |
-| official MPM (`StartServers 5`, `MaxRequestWorkers 150`, nothing overridden) | 3/3 |
+| official MPM (`StartServers 5`, `MaxRequestWorkers 150`, nothing overridden) | 3/3 on arm64; on x86-64 the pinned run against the same 69-child pool was **1/3** ([numbers](docs/VERSION_MATRIX.md#reliability-by-pool-size-measured-on-x86-64)) |
 | arbitrary command (not a fixed payload) | verified (`uname -m`, hostname, `id -u`) |
 | ASLR | fresh container gives a different `libphp`/`main`/`S`/`hsv` every time; addresses are recomputed from the disclosure on every run |
 | **negative control, PHP 8.4.27** | **no arming, no disclosure, no execution — even with that build's true addresses**. The vulnerable code path is still reached; the difference is that this build charges its limit checks in 2 MiB units, so the failure never lands on the encoder ([details](docs/NEGATIVE_CONTROL_8.4.27.md#why-the-arming-shapes-do-not-transfer-measured)) |
@@ -48,6 +48,18 @@ bash poc/chain.sh                          # defaults: id>/tmp/pwn.txt on the ta
 # -> proof:
 # uid=33(www-data) gid=33(www-data) groups=33(www-data)
 ```
+
+`chain.sh` runs `poc/preflight.py` first and refuses an incompatible target (wrong build, FPM,
+unexpected `memory_limit`), then gates B1 on the A1 signature. On the lab both pass without options;
+against a remote host add `--probe /probe.php` for the ini/SAPI part, and `--skip-preflight` /
+`--allow-unverified` only when you know why you are overriding.
+
+`--allow-arming-only` is the one override worth using deliberately: on 8.5.11 the arming step reproduces
+but the disclosure step cannot, so the run verifies the instrument and stops at the gate (exit `6`)
+instead of spending B1 on a step that is known to fail.
+
+Exit codes: `0` chain verified and the proof read, `2` preflight refused the target or a step failed,
+`5` preflight says the build arms but cannot disclose, `6` stopped after the gate on purpose.
 
 The official-MPM variant needs the other children held busy, which `chain.sh --workers` does for you:
 
@@ -80,8 +92,10 @@ lab-fpm/
   fpm_state.gdb                the state probe for a build with symbols
   www/probe.php                prints getmypid(), so "same worker" is measured, not assumed
 poc/
-  chain.sh                     A1 -> B1 -> addresses -> A2 -> B2, then reads the proof
+  chain.sh                     preflight -> A1 -> gate -> B1 -> addresses -> A2 -> B2, then reads the proof
   poc_menu.sh                  numbered runner (starts a container per action)
+  preflight.py                 recon and hard gate: version, SAPI, ini, pool size (--probe for the last three)
+  arming_gate.py               refuses B1 unless A1 produced the 4096 encode-site refusal
   a1_arm.py                    A1 arming request
   a1_probe.py                  cost of the exact arming body, measured at script entry (search aid)
   b1_forge.py                  B1 disclosure builder (--spec, --tag, --save-cookie)
@@ -139,18 +153,56 @@ Two traps worth knowing before reading the code:
 
 ## Scope and limits
 
-**Verified:** the image digest above, aarch64, `php.ini-production` active, `memory_limit=128M`,
-`display_errors=Off`, `session.upload_progress.cleanup=On`, Apache prefork (1 and 150 workers).
+**Verified:** the image digest above, aarch64 and x86-64 (3/3 end-to-end on amd64 against the same
+digest and ini — [numbers](docs/VERSION_MATRIX.md#x86-64-the-shape-transfers-the-execution-constants-do-not)),
+`php.ini-production` active, `memory_limit=128M`, `display_errors=Off`,
+`session.upload_progress.cleanup=On`, Apache prefork (1 and 150 workers).
 
 **Not verified:** other PHP patch levels &#8212; 8.4.27 was measured to fail, but only for the arming
 shapes constructible here (see [docs/NEGATIVE_CONTROL_8.4.27.md](docs/NEGATIVE_CONTROL_8.4.27.md));
-x86_64, opcache/JIT, distro PHP packages, other `memory_limit` values, other hosts.
+opcache/JIT, distro PHP packages, other `memory_limit` values, other hosts and architectures.
 The *method* transfers; the *constants* do not &#8212; a different build moves `zval_ptr_dtor`/`zif_system`,
 and `hsv`/`S`/`--fillers` are layout constants of this image.
 
 **PHP-FPM does not work, and cannot:** the arming request reaches the same one-page allocation failure
 there, but FPM terminates the worker on a bailout and forks a fresh one, so the dangling state never
 reaches a later request. Measured, with the lab and the logs in [docs/FPM.md](docs/FPM.md).
+
+## How often this actually works
+
+The honest denominator, because "the exploit exists" and "the exploit runs here" are different claims and
+only the second one survives contact with a client.
+
+Nine configurations were measured. **One** runs the chain end to end:
+
+| configuration | measured result |
+| --- | --- |
+| `php:8.4.26-apache`, prefork, **one worker**, no proxy, 128M | **works** — 3/3 on arm64, 3/3 on x86-64, proof read from the container |
+| same image, stock MPM (150 workers), pinned with `--workers` | 3/3 on arm64, **1/3** on x86-64 — the free child rotates |
+| `php:8.4.27-apache` | no arming at all: the limit checks are charged in 2 MiB units, so the failure never lands on the encoder |
+| `php:8.5.12-apache`, `8.3.36`, `8.2.35` | no arming at all |
+| `php:8.5.11-apache` | arms, but B1 discloses nothing: `PS(id)` is a refcounted copy, the encoder is never called |
+| any FPM build | worker replaced on bailout, state does not survive |
+| nginx in front with the default `client_max_body_size 1m` | the ~1.04 MiB arming body never reaches PHP |
+| `cli-server` | untested; preflight downgrades it to a warning |
+| opcache/JIT, distro packages, other `memory_limit` | untested |
+
+Across the six PHP releases that were measured, exactly one carries a working chain. That is not a
+limitation of the tooling — it is the shape of the bug: the arming step depends on where a specific
+allocation lands, and the disclosure step depends on which page the session id ends up on. Both are
+properties of one binary.
+
+**What this means for a report.** A chain that runs in a lab image is a statement about the bug class, not
+about a given host. For a client the only claim worth making is the one backed by a proof file read out
+of *their* environment: `<cmd> > file` executed, the file's contents shown, the user id named. Everything
+short of that is a compatibility estimate, and this table is the reason to say so plainly rather than let
+a reader assume "PHP 8.4" means "exposed".
+
+The practical consequence is the opposite of panic: `8.4.27` and later do not arm at all, FPM never
+carries state across the bailout, and any TLS-terminating proxy in front imposes a body limit below the
+arming shape. The window is one patch release of one branch, on one SAPI, without a proxy, with a single
+worker.
+
 
 **Requirements on the target:** a prefork SAPI where the four requests reach the same child
 (`MaxConnectionsPerChild > 0`, a graceful restart, or a process manager that recycles workers between
