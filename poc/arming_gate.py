@@ -22,7 +22,7 @@ Evidence comes from two places, strongest first:
                    container log could be read.
 
 exit: 0 armed (4096), 2 not armed / wrong failure, 3 A1 could not reach the target,
-      4 died but unverifiable without a container log
+      4 died or 5xx without a readable allocation size and without a container log
 
 usage:
   arming_gate.py --a1-output /tmp/a1.txt --container p2s-target --since 2026-10-29T10:00:00Z
@@ -61,7 +61,10 @@ def main(argv=None):
     ap.add_argument("--container", default="", help="target container name for the log check")
     ap.add_argument("--since", default="", help="RFC3339 timestamp taken just before A1")
     ap.add_argument("--allow-unverified", action="store_true",
-                    help="treat 'died, no log available' as a pass instead of exit 4")
+                    help="continue when the A1 outcome fits an armed target but cannot be confirmed")
+    ap.add_argument("--remote", action="store_true",
+                    help="target has no readable container log: judge on the A1 HTTP outcome only, "
+                         "and continue when that outcome is the armed one")
     args = ap.parse_args(argv)
 
     try:
@@ -78,7 +81,9 @@ def main(argv=None):
     body_sizes = sorted({int(m) for m in re.findall(r"tried to allocate (\d+)", a1)})
 
     log_text, log_error = None, "no --container given"
-    if args.container:
+    if args.remote:
+        log_error = "--remote"
+    elif args.container:
         log_text, log_error = docker_logs(args.container, args.since)
 
     log_sizes = []
@@ -126,21 +131,52 @@ def main(argv=None):
               "land at php_url_encode (docs/VERSION_MATRIX.md)", file=sys.stderr)
         return 2
 
+    # Nothing measurable in the output. From here on the only evidence is the *shape* of the A1
+    # outcome, and with display_errors Off that shape is all a remote target will ever give: a 500
+    # with Apache's tiny error page and no cookie. A 200 is what a non-arming build (8.4.27) returns.
+    # Neither is the 4096 text, so both stay "unverified" - the difference is that the 500 one is
+    # worth continuing from and the 200 one is not.
+    def unverified(reason):
+        print("unverified: %s" % reason, file=sys.stderr)
+        if args.allow_unverified or args.remote:
+            print("  continuing anyway - arming is not confirmed, B1 is the real test")
+            return 0
+        print("  pass --container <name>, --remote or --allow-unverified to continue",
+              file=sys.stderr)
+        return 4
+
     died = bool(re.search(r'"sockerr":\s*"[^"]+', a1))
     if died:
-        if log_text is None:
-            print("unverified: A1 died, but no container log (%s)" % log_error, file=sys.stderr)
-            if args.allow_unverified:
-                print("  continuing on --allow-unverified")
-                return 0
-            print("  pass --container <name> or --allow-unverified to continue", file=sys.stderr)
-            return 4
-        print("not armed: A1 died but no allocation size appears in the log - most likely "
-              "post_max_size, a proxy limit or a different ini", file=sys.stderr)
-        explain()
-        return 2
+        if log_text is not None:
+            print("not armed: A1 died but no allocation size appears in the log - most likely "
+                  "post_max_size, a proxy limit or a different ini", file=sys.stderr)
+            explain()
+            return 2
+        return unverified("A1 was cut off mid-body and no container log says why (%s)" % log_error)
 
-    print("not armed: A1 completed without an OOM", file=sys.stderr)
+    codes = [int(code) for code in re.findall(r'"status":\s*"HTTP/[\d.]+ (\d{3})', a1)]
+    resp_bytes = [int(n) for n in re.findall(r'"resp_bytes":\s*(\d+)', a1)]
+    if any(500 <= code < 600 for code in codes):
+        if log_text is not None:
+            print("not armed: A1 answered %d and the log names no allocation size - a fatal, but not "
+                  "the encoder's page" % codes[0], file=sys.stderr)
+            explain()
+            return 2
+        if args.allow_unverified or args.remote:
+            print("armed (inferred): A1 answered %d with a %d-byte body and no Set-Cookie - the armed "
+                  "shape with display_errors Off (%s)"
+                  % (codes[0], resp_bytes[0] if resp_bytes else 0, log_error))
+            print("  not confirmed: the 4096 text needs a container log, so B1 decides")
+            explain()
+            return 0
+        print("unverified: A1 answered %d, which is what an armed target looks like with "
+              "display_errors Off, but there is no container log to confirm the allocation size (%s)"
+              % (codes[0], log_error), file=sys.stderr)
+        print("  pass --container <name>, --remote or --allow-unverified to continue", file=sys.stderr)
+        return 4
+
+    print("not armed: A1 completed without an OOM (HTTP %s)"
+          % (codes[0] if codes else "?"), file=sys.stderr)
     explain()
     return 2
 

@@ -74,7 +74,7 @@ def main():
     ap.add_argument("--zif", required=True, help="addr of zif_system (libphp + its offset)")
     ap.add_argument("--cmd", required=True, help="shell command to run")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--size", type=int, default=SIZE)
+    ap.add_argument("--size", type=lambda x: int(x, 0), default=SIZE)
     args = ap.parse_args()
     ht_addr = int(args.ht, 0)
     zif = int(args.zif, 0)

