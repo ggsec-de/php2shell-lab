@@ -49,7 +49,7 @@ Ini values verified identical on both images for `max_input_vars` (1000), `max_i
 ```
 POSITIVE ARM (8.4.26)                        NEGATIVE ARM (8.4.27)
   php            : 8.4.26                      php            : 8.4.27
-  OOM in log     : 20480                       OOM in log     : (none)
+  OOM in log     : 20480 (A2; A1 arms at 4096) OOM in log     : (none)
   B1 Set-Cookie  : 1 679 400 chars             B1 Set-Cookie  : 32 chars
   leak_addrs     : derived addresses           leak_addrs     : refused (fail-closed)
   B2 addresses   : from the leak               B2 addresses   : zif=0x7fff5cc51510 (from gdb)

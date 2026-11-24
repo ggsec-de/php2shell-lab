@@ -14,12 +14,10 @@ Tool: `poc/sid_matrix.py`. Signal: **no `Set-Cookie` = adopted**; `Set-Cookie` w
 |---|---|---|---|
 | 0 | first | field | **replaced** |
 | 1, 2, 5, 19, 25 | first | field | **adopted** (3/3 each) |
-| 0, 1, 2, 5, 19 | last | field | **replaced** |
-| 25 | last | field | **adopted** |
+| 0, 1, 2, 5, 19, 25 | last | field | **replaced** |
 | 0 | first | cookie | **replaced** |
 | 1, 2, 5, 19, 25 | first | cookie | **adopted** |
-| 0, 1, 2, 5, 19 | last | cookie | **replaced** |
-| 25 | last | cookie | **adopted** |
+| 0, 1, 2, 5, 19, 25 | last | cookie | **replaced** |
 
 ```
 Determinism check: all cells consistent
@@ -33,9 +31,10 @@ Determinism check: all cells consistent
 2. **What matters is whether a file part follows the progress field.** `progress first` + at least
    one file part = adopted, every time. `progress first` with no file part = replaced (there is
    nothing to attach the progress entry to).
-3. **`progress last` is rejected for up to 19 file parts and adopted at 25.** The crossover sits at
-   `max_file_uploads` (default 20): past the cap PHP stops registering uploads, which changes which
-   event the callback sees last. Deterministic, but a config-dependent edge — do not build on it.
+3. **`progress last` is replaced at every file count tested (0 through 25).** The cap at
+   `max_file_uploads` (default 20) is visible as a startup warning with 25 parts, but it does not
+   change adoption. An earlier reading had 25 parts as the crossover; a replay did not reproduce it,
+   so do not build on that edge.
 4. Valid charset and length are still required (see [SID_ADOPTION.md](./SID_ADOPTION.md)); this
    matrix used a 32-hex value throughout, so every "replaced" above is a *logic* decision, not a
    rejected string.
@@ -52,7 +51,7 @@ Determinism check: all cells consistent
   are the mechanism, not an optimisation.
 - **The shape is now selectable on purpose.** Any stage that needs the id adopted must put the
   progress field first and include a file part; any stage that needs the id *untouched* must use
-  progress-last with fewer than 20 file parts.
+  progress-last, which stayed replaced at every file count tested (0 through 25).
 
 ## Reproduce
 

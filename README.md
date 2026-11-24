@@ -21,11 +21,11 @@ Result on the tested target: `system()` runs as `www-data`.
 | what | result |
 |---|---|
 | single-worker baseline, fresh container per run | 3/3 |
-| official MPM (`StartServers 5`, `MaxRequestWorkers 150`, nothing overridden) | 3/3 on arm64; on x86-64 the pinned run against the same 69-child pool was **1/3** ([numbers](docs/VERSION_MATRIX.md#reliability-by-pool-size-measured-on-x86-64)) |
+| official MPM (`StartServers 5`, `MaxRequestWorkers 150`, nothing overridden) | original runs: 3/3 on arm64; x86-64 **1/3**; an arm64 replay gave **2/10** across 3-40 s settles ([numbers](docs/VERSION_MATRIX.md#reliability-by-pool-size)) |
 | arbitrary command (not a fixed payload) | verified (`uname -m`, hostname, `id -u`) |
 | ASLR | fresh container gives a different `libphp`/`main`/`S`/`hsv` every time; addresses are recomputed from the disclosure on every run |
 | **negative control, PHP 8.4.27** | **no arming, no disclosure, no execution — even with that build's true addresses**. The vulnerable code path is still reached; the difference is that this build charges its limit checks in 2 MiB units, so the failure never lands on the encoder ([details](docs/NEGATIVE_CONTROL_8.4.27.md#why-the-arming-shapes-do-not-transfer-measured)) |
-| **PHP-FPM** | **does not transfer**: the arming fires identically, but FPM replaces the worker on a bailout, so no state survives ([details](docs/FPM.md)) |
+| **PHP-FPM** | **this arming route does not transfer**: the arming fires identically, but FPM replaces the worker on a bailout, so no state survives ([details](docs/FPM.md)) |
 | **other builds** | the arming signature (`4096` at the encoder) appears on **8.4.26 and 8.5.11**, and does not appear on **8.4.27, 8.5.12, 8.3.36 or 8.2.35** ([details](docs/VERSION_MATRIX.md)) |
 
 Tested on **one** image and **one** configuration. See [Scope and limits](#scope-and-limits) before
@@ -51,15 +51,34 @@ bash poc/chain.sh                          # defaults: id>/tmp/pwn.txt on the ta
 
 `chain.sh` runs `poc/preflight.py` first and refuses an incompatible target (wrong build, FPM,
 unexpected `memory_limit`), then gates B1 on the A1 signature. On the lab both pass without options;
-against a remote host add `--probe /probe.php` for the ini/SAPI part, and `--skip-preflight` /
+against a remote host add `--probe /probe.php` for the ini/SAPI/arch part, and `--skip-preflight` /
 `--allow-unverified` only when you know why you are overriding.
+
+**A target you cannot reach into runs too.** If `docker inspect` on `--container` fails, the chain reads
+the architecture, the arming outcome and the proof from the target instead of from a container, and says
+so. Give it a probe and a served proof path:
+
+```bash
+bash poc/chain.sh --target https://host/index.php --probe /probe.php \
+  --cmd 'id>/var/www/html/pwn.txt' --proof pwn.txt --proof-url https://host/pwn.txt
+```
+
+The arming is then *inferred* from A1's answer rather than read out of a log, so the run ends with exit
+`7` while the proof stands. `--symbols` overrides the offset profile.
+
+Profiles are keyed by architecture, version **and** distribution, because a package build is a
+different binary: `x86_64/8.4.26` is the official image, `x86_64/8.4.24+debian13` is Debian 13's
+`libapache2-mod-php8.4`. The Debian build arms and discloses but its B2 does not land yet, so preflight
+reports it as a warning rather than a verified build; `--symbols` from that host's own `nm` is the way
+past it. See [docs/VERSION_MATRIX.md](docs/VERSION_MATRIX.md#debian-13-php-8424).
 
 `--allow-arming-only` is the one override worth using deliberately: on 8.5.11 the arming step reproduces
 but the disclosure step cannot, so the run verifies the instrument and stops at the gate (exit `6`)
 instead of spending B1 on a step that is known to fail.
 
 Exit codes: `0` chain verified and the proof read, `2` preflight refused the target or a step failed,
-`5` preflight says the build arms but cannot disclose, `6` stopped after the gate on purpose.
+`5` preflight says the build arms but cannot disclose, `6` stopped after the gate on purpose,
+`7` proof read but arming only inferred (no container log).
 
 The official-MPM variant needs the other children held busy, which `chain.sh --workers` does for you:
 
@@ -112,7 +131,7 @@ gdb/                           calibration instruments (never used in a delivery
 docs/
   POC_CHAIN.md                 the chain, the address model, the runbook, the limits
   NEGATIVE_CONTROL_8.4.27.md   protocol, results, and what "no evidence" is defined to mean
-  FPM.md                       why the chain is prefork-specific, measured against nginx + FPM
+  FPM.md                       why this arming route does not transfer, measured against nginx + FPM
   VERSION_MATRIX.md            which builds still arm: the 4096 signature across six images, plus the
                                8.5.11 port attempt and what it takes
   B1_GATE.md                   23 iterations of the research log, including the retractions
@@ -136,7 +155,7 @@ enough to place libphp:
 | `zif_system` | `libphp + 0x42CD70` | resolved from the image's symbol table |
 | main chunk | disclosed chunk `+ 0x400000` | leak cluster compared with `alloc_globals->heap` in the same run |
 | `S` (fake array) | main `+ 0xF8398` | layout constant of this image |
-| `hsv` (stale zval) | main `+ 0x7D720` | layout constant of this image |
+| `hsv` (stale reference) | main `+ 0x7D720` | layout constant of this image; the stale zval is the global `ps_globals + 0x168` |
 
 Two traps worth knowing before reading the code:
 
@@ -164,9 +183,11 @@ opcache/JIT, distro PHP packages, other `memory_limit` values, other hosts and a
 The *method* transfers; the *constants* do not &#8212; a different build moves `zval_ptr_dtor`/`zif_system`,
 and `hsv`/`S`/`--fillers` are layout constants of this image.
 
-**PHP-FPM does not work, and cannot:** the arming request reaches the same one-page allocation failure
-there, but FPM terminates the worker on a bailout and forks a fresh one, so the dangling state never
-reaches a later request. Measured, with the lab and the logs in [docs/FPM.md](docs/FPM.md).
+**PHP-FPM does not work for this arming route:** the arming request reaches the same one-page allocation
+failure there, but FPM terminates the worker on a bailout and forks a fresh one, so the dangling state
+never reaches a later request. That is a statement about the OOM-during-startup producer, not about FPM in
+general: the advisory records a separate validated FPM path. Measured, with the lab and the logs in
+[docs/FPM.md](docs/FPM.md).
 
 ## How often this actually works
 
@@ -178,7 +199,7 @@ Nine configurations were measured. **One** runs the chain end to end:
 | configuration | measured result |
 | --- | --- |
 | `php:8.4.26-apache`, prefork, **one worker**, no proxy, 128M | **works** — 3/3 on arm64, 3/3 on x86-64, proof read from the container |
-| same image, stock MPM (150 workers), pinned with `--workers` | 3/3 on arm64, **1/3** on x86-64 — the free child rotates |
+| same image, stock MPM (150 workers), pinned with `--workers` | 3/3 on arm64 in the original run, **1/3** on x86-64, and an arm64 replay gave **2/10** across 3-40 s settles — the free child rotates |
 | `php:8.4.27-apache` | no arming at all: the limit checks are charged in 2 MiB units, so the failure never lands on the encoder |
 | `php:8.5.12-apache`, `8.3.36`, `8.2.35` | no arming at all |
 | `php:8.5.11-apache` | arms, but B1 discloses nothing: `PS(id)` is a refcounted copy, the encoder is never called |
@@ -253,7 +274,7 @@ transfer cannot leave a half-updated tree. It also asserts the installed file co
 caught a leading `~` reaching bash unexpanded (the tree had landed in a directory literally named `~`).
 
 Both hosts are checked at the time of writing: 67 files each, every hash matching the working copy, and
-three consecutive end-to-end runs on each — 3/3 on arm64, 3/3 on x86-64.
+three consecutive end-to-end runs on each on the single-worker baseline — 3/3 on arm64, 3/3 on x86-64.
 
 ## Credit
 

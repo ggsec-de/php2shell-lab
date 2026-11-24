@@ -25,9 +25,17 @@ $walk = function ($value, $depth) use (&$walk, &$deepest, &$count) {
     }
 };
 $walk($_POST, 0);
+// Distribution of a package build, e.g. "debian13". Part of the offset-profile key: the same PHP
+// version from a different packager is a different libphp with different offsets.
+$os_release = @file_get_contents('/etc/os-release') ?: '';
+preg_match('/^ID="?([a-z0-9]+)"?$/m', $os_release, $os_id);
+preg_match('/^VERSION_ID="?([0-9]+)"?$/m', $os_release, $os_ver);
 echo json_encode([
     'php' => PHP_VERSION,
     'sapi' => php_sapi_name(),
+    'arch' => php_uname('m'),
+    'os' => php_uname('s'),
+    'distro' => ($os_id[1] ?? '') . ($os_ver[1] ?? ''),
     'pid' => getmypid(),
     'post_top_level' => count($_POST),
     'post_nodes' => $count,

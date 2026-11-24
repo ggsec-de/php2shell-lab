@@ -110,7 +110,8 @@ try {
         Write-Host ''
         Write-Host 'dry run: the remote tree was not touched.' -ForegroundColor Yellow
         & ssh @sshArgs $Remote "rm -f '$remoteArchive'" | Out-Null
-        Write-Host ("  would install {0} files into {1}/{2}:" -f $files.Count, $Dest, $repoName)        $files | ForEach-Object { Write-Host ('    ' + $_.FullName.Substring($repoRoot.Length).TrimStart('\', '/')) }
+        Write-Host ("  would install {0} files into {1}/{2}:" -f $files.Count, $Dest, $repoName)
+        $files | ForEach-Object { Write-Host ('    ' + $_.FullName.Substring($repoRoot.Length).TrimStart('\', '/')) }
         return
     }
 

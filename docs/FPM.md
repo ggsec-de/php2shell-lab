@@ -1,4 +1,4 @@
-# PHP-FPM: the same bug, a different SAPI — and why the chain does not transfer
+# PHP-FPM: the same bug, a different SAPI - and why this arming route does not transfer
 
 The Apache arm works because one process keeps living after a request is aborted by an out-of-memory
 bailout. This document measures whether PHP-FPM behaves the same way. It does not, and the difference
@@ -78,15 +78,20 @@ lab raises the limit deliberately (`client_max_body_size 64m`) because otherwise
 
 ## What this means
 
-- **The chain is prefork-specific.** Not because FPM cannot reach the vulnerable code — it can, and the
-  failure site is identical — but because FPM ends the worker that would have carried the state into the
-  next request.
+- **This measures the startup-OOM route, not every FPM route.** The vendor advisory for
+  CVE-2026-109619 records a validated FPM path that publishes the state during application execution
+  after a successful startup, reaches a fatal error, and then uses session upload progress as the early
+  consumer. The measurement here says that *this* producer (OOM during multipart startup) cannot carry
+  state across an FPM request boundary; it does not say FPM is immune.
+- **For this chain the SAPI is the difference.** Not because FPM cannot reach the vulnerable code — it
+  can, and the failure site is identical — but because FPM ends the worker that would have carried the
+  state into the next request.
 - **`pm.max_children = 1` is not the same as `MaxRequestWorkers 1`.** Pinning FPM to a single worker
   does not help an attacker: the single worker is still replaced after every bailout.
-- **For defenders:** running PHP-FPM behind a proxy that terminates requests is a strong structural
-  mitigation for the cross-request half of this bug class, independent of patching. Raising
-  `client_max_body_size` removes the accidental 413 barrier and should be done deliberately, not to
-  "make it work".
+- **For defenders:** running PHP-FPM behind a proxy that terminates requests is a barrier for this
+  route, independent of patching. It is not a barrier for the wider bug class, whose other FPM path is
+  recorded in the advisory. Raising `client_max_body_size` removes the accidental 413 barrier and
+  should be done deliberately, not to "make it work".
 - **For the PoC:** everything in `poc/` assumes prefork, and `poc/hold_workers.py` only makes sense
   there. The FPM lab is shipped so the negative result can be reproduced rather than trusted.
 

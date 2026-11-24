@@ -98,3 +98,6 @@ else
   $DOCKER exec "$NAME" sh -c "grep -v '^#' /etc/apache2/mods-enabled/mpm_prefork.conf | sed '/^$/d'"
   echo "workers  : official - run the chain with --workers 150"
 fi
+
+# A target that did not answer is a failed start even though the diagnostics above are useful.
+[ "$REPLY" = "OK" ] || exit 1

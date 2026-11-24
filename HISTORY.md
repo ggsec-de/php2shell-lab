@@ -4,9 +4,10 @@ A record of the research behind this repository: five days, 56 commits, and 23 d
 
 This document is written so that someone repeating the work knows which roads are closed and why, not only which one is open.
 
-> **Note:** the CVE identifiers used in this repository are currently referenced as
-> `CVE-2026-109618` and `CVE-2026-109619`. The final mapping between identifiers,
-> failure classes, and vendor advisories should be verified before publication.
+> **Note:** the two identifiers are confirmed against the PHP advisories: `CVE-2026-109618`
+> is "RCE via OOM corruption" (GHSA-w8hw-w9fx-j79w) and `CVE-2026-109619` is "RCE via stale
+> global state" (GHSA-6wmf-4rv5-p3rp). Both are engine-level; the application-level `include()`
+> behaviour described below is a separate failure mode, not one of these two records.
 
 ---
 
@@ -42,10 +43,10 @@ This material must not be used against systems without explicit authorization.
 
 | Working identifier | Failure class | Short description |
 | --- | --- | --- |
-| `CVE-2026-109618` | Application-level unsafe include chain | Session file contents reach an application-side `include()` that is not fully controlled |
-| `CVE-2026-109619` | Engine-level stale-pointer / memory disclosure | An allocation failure leaves a dangling session identifier in allocator memory that a later request can read |
+| `CVE-2026-109618` | Engine-level OOM corruption | The `longjmp()` used for OOM can exit a context before request memory is initialized; request cleanup then reads or branches on it |
+| `CVE-2026-109619` | Engine-level stale global state (session upload progress) | Global state that points into request memory can stay published after that memory is freed; a later request consumes it before initialization |
 
-Both identifiers are working labels, used consistently across this document and the linked notes.
+Both identifiers are used consistently across this document and the linked notes.
 
 ---
 
@@ -65,7 +66,7 @@ Both identifiers are working labels, used consistently across this document and 
 | Negative control | 8.4.27 paired control: no arming, no leak, no execution |
 | Second positive arm | `php:8.5.11-apache` reproduces the arming signature (`4096`) with the same body, stock ini |
 | Builds that do not arm | 8.4.27, 8.5.12, 8.3.36, 8.2.35 &#8212; no page-sized refusal at any tested limit |
-| SAPI ruled out | PHP-FPM: the arming fires identically, but the worker is replaced on bailout, so no state survives |
+| SAPI tested | PHP-FPM: the startup-OOM route fires identically, but the worker is replaced on bailout, so no state survives; the advisory records a separate validated FPM path |
 
 ---
 
@@ -524,7 +525,8 @@ Full tables and method:
 Positive-arm verification:
 
 - 3/3 single-worker baseline;
-- 3/3 150-worker MPM configuration;
+- 3/3 150-worker MPM configuration in the original run; an arm64 replay of ten later gave 2/10, so the
+  stock pool is a race ([numbers](docs/VERSION_MATRIX.md#reliability-by-pool-size));
 - 1 arbitrary command run.
 
 Signature-level verification (the `4096` arming test, no addresses required):

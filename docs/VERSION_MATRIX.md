@@ -47,9 +47,9 @@ Two things follow, and both matter for reading the table below.
 
 * **Chunked framing does not bypass the gate** on these builds. It is parsed slightly further (5 nodes
   against 1) and then abandoned. Claims to the contrary do not reproduce here.
-* **A no-OOM row only means something when the body was actually parsed.** S1 is 6 MB and fits under
-  8M, so it runs on stock ini; S2 and S3 need `post_max_size` raised, and their rows are labelled
-  accordingly.
+* **A no-OOM row only means something when the body was actually parsed.** S1 is about 1 MiB and
+  fits under 8M, so it runs on stock ini; S2 and S3 need `post_max_size` raised, and their rows are
+  labelled accordingly.
 
 ## Results
 
@@ -63,9 +63,12 @@ Failing allocation per shape. `4096` = the arming signature; anything else is th
 | `php:8.5.12-apache` | no OOM | `2097152` | `3014656` |
 | `php:8.3.36-apache` | no OOM | `2097152` | `3014656` |
 | `php:8.2.35-apache` | no OOM | `2097152` | `3014656` |
+| Debian 13 `libapache2-mod-php8.4` 8.4.24, x86-64 | **`4096`** &#8212; arms, full chain | &#8212; | &#8212; |
+| Debian 13 `libapache2-mod-php8.4` 8.4.24, arm64 | **`4096`** &#8212; arms, full chain blind 3/3 | &#8212; | &#8212; |
+| Ubuntu 24.04 `libapache2-mod-php8.3` 8.3.6 | no OOM (six A1 shapes) | not measured | not measured |
 
 S2/S3 columns for 8.4.27, 8.5.12, 8.3.36 and 8.2.35 were measured with `post_max_size = 256M`; the S1
-column was measured at stock ini, where the 6 MB body is parsed normally.
+column was measured at stock ini, where the 1 MiB body is parsed normally.
 
 ## What the table says
 
@@ -312,7 +315,7 @@ change is backward compatible and removes a latent fragility rather than adding 
 One process note: with a single Apache child the crash that ends the chain takes the container down, so
 the proof has to be read with ``docker cp`` from the stopped container, not ``docker exec``.
 
-## Reliability by pool size, measured on x86-64
+## Reliability by pool size
 
 The chain needs all four requests to reach the same Apache child, because what A1 leaves behind is that
 child's heap. On a pool bigger than one that is a race, and it is worth stating with numbers rather than
@@ -321,28 +324,155 @@ being discovered by a user:
 | target | runs | proof |
 | --- | --- | --- |
 | single worker (`lab/start_target.sh --single`) | 5 | **5/5** |
-| stock MPM, `hold_workers.py` pinning 149 connections | 3 | **1/3** |
+| stock MPM, `hold_workers.py` pinning 149 connections (x86-64) | 3 | **1/3** |
+| stock MPM, same pinning (arm64 replay, 2026-11-24) | 10 | **2/10** |
 
 Pinning itself works - with the holder established, four plain probe requests all came back with the same
 `pid`, and without it they scattered across four children. What does not hold is that the *free* child at
-step N is the same one as at step N+1: the pool is smaller than the number of held connections (69
-children for 149 open sockets in this image), so a request is accepted by whichever child frees up, and
-after the arming step that is not guaranteed to be the armed one.
+step N is the same one as at step N+1. The pool does not sit at the held count: with 149 connections held,
+the process count ran 9 -> 101 -> 151 at 2, 5 and 10 s, then gave children back (149 at 20 s, 144 at 30 s,
+139 at 40 s). A chain started 3 s after the holder runs while the pool is still growing; one started after
+12 s or more runs after it has begun to shrink, and a freed child picks up a queued held connection before
+the next step can use it.
+
+The arm64 replay, one fresh container per run: 1/3 at the default 3 s settle, 1/2 at 8 s, 0/2 at 12 s,
+0/3 at 40 s. The 3/3 recorded for the stock MPM on arm64 was the original measurement; the single-worker
+baseline stayed 3/3 and is the configuration to quote when the proof has to be deterministic.
 
 `chain.sh` therefore prints a warning when B2 comes back answered instead of dropping the connection -
 that is the signature of this race, and without it the failure looks like a broken exploit rather than a
 lost race. The menu's custom-command path now uses the single-worker baseline, since the command is the
 point of that option and the pool is not.
 
+`chain.sh` therefore prints a warning when B2 comes back answered instead of dropping the connection -
+that is the signature of this race, and without it the failure looks like a broken exploit rather than a
+lost race. The menu's custom-command path now uses the single-worker baseline, since the command is the
+point of that option and the pool is not.
+
+## Debian 13, php8.4 8.4.24 (package build)
+
+The first distribution package measured, and the reason the profiles are keyed by more than a version.
+`debian:trixie-slim` + `libapache2-mod-php8.4=8.4.24-1~deb13u1` (module build-id
+`a53126ca5ef3f1c12e9bd48cf7cccd63698fc818`), apache2handler, prefork, one worker, `memory_limit 128M`,
+`post_max_size 8M`, `display_errors Off`.
+
+It **carries the full chain**: A1 ends in `tried to allocate 4096 bytes` at the encoder, B1 returns a
+1.6 MB cookie, `leak_addrs.py` resolves libphp, main, `S` and `hsv`, and B2 drops the connection and
+writes the proof (`uid=33(www-data)`). Verified 3/3 on runs where B1 disclosed - B1 itself is the
+intermittent stage here (empty body roughly every second run), which is a property of the leak step, not
+of this build.
+
+Measured for this binary (all four symbols from the `-dbgsym` package, the two heap slots from
+`/proc/<pid>/mem` after A2):
+
+| quantity | value |
+| --- | --- |
+| `zval_ptr_dtor` | `0x424FF0` |
+| `zif_system` | `0x24CDD0` |
+| `zend_hash_destroy` | `0x3D9570` |
+| `php_url_encode` | `0x2A4250` |
+| `S` | main `+ 0xF7398` |
+| `hsv` | main `+ 0x7D6E0` |
+| `spray_first` | `8` |
+| `fillers` | `116` (the reference has to land inside a spray string's data, see below) |
+
+Two things differ from the official image beyond the offsets and are worth knowing before porting
+another package:
+
+- The module is **stripped**. `nm` yields only the dynamic table, so `zval_ptr_dtor` and
+  `zend_hash_destroy` are readable but `zif_system` is not; the profile supplies it. The full table
+  needs the `-dbgsym` package.
+- The **main chunk is 206..210 MiB above the disclosed one**, not 4 MiB. The old 16 MiB window picked a
+  small unrelated chunk and every B2 missed; `leak_addrs.py` now searches 256 MiB and picks by pointer
+  count, excluding the module's own mappings.
+
+Why the shape matters here, and what it took: on this build the reference lands at page offset `0x6e0`
+of a 448-byte-allocation page. The spray strings are 448 bytes too (`--vl 384`), carved at
+`0x000 / 0x1c0 / 0x380 / 0x540 / 0x700`, so their data covers `0x018..0x198`, `0x1d8..0x378`, ... - and
+`0x6e0..0x700` falls into the `0x40`-wide padding between two data ranges. The spray can never write
+there, the dtor then destroys the real session array (type `0x307`) and the request is answered. One
+more filler (`--fillers 116`; measured `0x40` per filler on this build) moves the reference to `0x720`,
+which is inside the next chunk's data range - and `--first 8` puts the fake reference's own header
+exactly on it. With `--fillers 115` (the official-image value) the reference stays in the padding and
+B2 is answered; with `--first` anything but `8 + 0x20k` the fake reference misses by a few bytes. Both
+knobs are carried by the profile.
+
+Free-list walk at B2 start (bin 3 = 32 B: 121 free chunks, `hsv` not among them; bin 18 = 448 B: 0-8
+free chunks, none covering `hsv`) is what ruled out "the chunk is free and the spray just misses it" -
+the memory is chunk padding, not a free chunk.
+
+What was ruled out, with the measurement behind it:
+
+- `--sid-last`, `--spray-first 0/16/64`, `--parts` 700..1000, `--n1` up to 3600, `--vl` 256..640, three
+  A2 requests in a row: no value lands. `--depth` other than 64 stops A2 from OOMing at all.
+- `--no-sid-field` (id only in the cookie) makes `PS(id)` NULL, so `php_session_reset_id` fails with
+  "Cannot set session ID - session ID is not initialized" and `php_session_track_init` never runs. The
+  profile default is now `sid_field = 1`; the progress field is always sent with the id.
+- a read-only session directory makes `ps_files_open` fail, so `php_session_initialize` returns before
+  `track_init` and the dtor never runs at all.
+- an empty `session.save_path` (php.ini drop-in; Apache `php_value` cannot take an empty value) moves the
+  reference to `hsv + 0x20` and it is still in padding.
+
+The OOM bailout does not call `php_rshutdown_session_globals` on either image, and the heap around `hsv`
+right after A2 is byte-for-byte equivalent on both. The difference appears only while B2 is parsed: on
+the official the allocator hands out the still-referenced chunk (the first write to `hsv` during B2 is
+the spray write from `php_sapi_filter`, with no free-list write before it), on this build the page is
+carved during B2 but the chunk covering the reference is not reached before the dtor.
+
+
+Two real bugs were found and fixed on the way, both independent of the padding:
+
+- the fingerprint ranked candidate load bases by how many *different* symbols hit them, so two symbols
+  landing on a 4-pointer page beat one symbol with 876 pointers. It now ranks by pointer weight.
+- pointer-shaped integers (`0x100000000`, `0x700000000`) were accepted as a load base, which made the
+  chunk selection pick the module's own data chunk as "main". Bases below 8 GiB are rejected and a base
+  must lie within 512 MiB of the disclosed chunk.
+
+## Debian 13, php8.4 8.4.24, arm64 (package build)
+
+Same package source, arm64 build (module build-id `07d8a3d3bae0a00c0bf4264a0b2a554f02b755d8`), run
+natively on a Raspberry Pi 5 - the chain was verified **blind** (no container access, proof fetched over
+HTTP) 3/3, every run ending in `uid=33(www-data)`. B1 disclosed on every run there.
+
+Measured for this binary (all four symbols from the arm64 `-dbgsym` package, the heap slots read out of
+`ps_globals + 0x168` in a live request):
+
+| quantity | value |
+| --- | --- |
+| `zval_ptr_dtor` | `0x41F9E0` |
+| `zif_system` | `0x230FB0` |
+| `zend_hash_destroy` | `0x3D32E0` |
+| `php_url_encode` | `0x289E60` |
+| `S` | main `+ 0xF7398` (same as x86-64) |
+| `hsv` | main `+ 0x7D720` (measured - not the x86-64 package value) |
+| `spray_first` / `fillers` | `8` / `116` |
+
+Two porting notes, both found with the trace-and-scan method above:
+
+- The main-chunk picker threw the real main chunk away on arm64: the heap chunk sits 2 MiB *below* the
+  module base, and the module exclusion (`± 8 MiB` around the module base) was two-sided. It is
+  one-sided now - only mappings at or above the module base are excluded - so the `+0xd400000` cluster
+  (455 pointers) is picked, exactly as the `+0xce00000` one is on x86-64.
+- `hsv_off` had to be measured on the native board rather than assumed from x86-64 or from a qemu run:
+  the reference sat at page offset `0x6e0` under qemu but at `0x720` natively, and `0x720` is what the
+  dtor reads. The 448-byte chunk grid of the spray made `0x6e0` a dead zone - the same
+  padding-versus-data accident as the `--fillers` tuning above.
+
 ## Limits
 
+- Debian 13 8.4.24 arm64: the chain was verified blind on a Raspberry Pi 5 (Kali arm64, native - no
+  emulation) 3/3, every run ending in the proof. B1 disclosed on every run there; on x86-64 B1 is the
+  intermittent stage (empty body roughly every second run).
 - The signature is not the chain. A `4096` says the arming step is reachable; it does not by itself
   prove disclosure or execution, which need addresses recalibrated for that build. The full chain was
   verified end-to-end on 8.4.26 (3/3) and, by the separate PoC, on 8.5.11 (3/3).
-- Stock `php:*-apache` images only, single Apache child. No FPM row here (FPM cannot carry the
-  state across requests at all, see [FPM.md](FPM.md)), no distro packages, no opcache. x86-64 reached
+- Stock `php:*-apache` images only, single Apache child. No FPM row here (this arming route cannot
+  carry the state across FPM requests, see [FPM.md](FPM.md)), no opcache. x86-64 reached
   the same arming/disclosure/execution result on the same digest (3/3, own section above); the
   layout constants stayed identical, only the chunk delta had to be derived.
+- One distro package is measured (Debian 13, 8.4.24) and carries the full chain, blind included. Its
+  offsets, heap slots and arming shape are in `SYMBOL_PROFILES` under `x86_64/8.4.24+debian13`; the
+  intermittent stage here is B1's leak, not the build.
 - "No OOM" is a statement about these three shapes and this ini. It is not a proof that no body
   exhausting a page can be built for these builds; it is the same class of evidence as the negative
   control, one instrument stronger because the positive control is on a different branch.
