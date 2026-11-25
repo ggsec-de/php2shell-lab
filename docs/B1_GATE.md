@@ -2,7 +2,7 @@
 
 > **Reading note.** This is the lab notebook from the day the disclosure was worked out, kept in the
 > order it happened — including the claims that were later retracted. It references instruments that
-> stayed in the private lab (they answered questions that are already answered here), so a `gdb/…` or
+> stayed out of this repository (they answered questions that are already answered here), so a `gdb/…` or
 > `poc/…` name that is not in this repository means "used during the work", not "missing file".
 > Everything needed to reproduce the result is shipped; see `docs/POC_CHAIN.md`.
 
