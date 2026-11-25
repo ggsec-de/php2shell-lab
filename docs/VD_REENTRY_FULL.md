@@ -188,7 +188,7 @@ deterministic way. **What it is not:** a chain. There is no leak here, no fake z
 | tests on `PHP-8.2` | no |
 | tests in tag `php-8.5.12` | **no** — 27 701 files in the tag, neither test |
 | tests in tag `php-8.4.27` | no |
-| release tags `php-8.5.13`, `php-8.4.28`, `php-8.3.37`, `php-8.2.36` | none exist yet (checked 2026-10-27) |
+| release tags `php-8.5.13`, `php-8.4.28`, `php-8.3.37`, `php-8.2.36` | none existed on 2026-10-27; re-checked 2026-11-25, all four exist and contain `08f4b64` |
 | reported to `security@php.net` | 2026-10-26, no reply yet |
 
 Two corrections to what this section said before, both ours to own:

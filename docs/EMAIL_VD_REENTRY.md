@@ -96,3 +96,11 @@ Still standing:
   release; say so plainly rather than implying it exists.
 - Record the reply in `docs/VD_REENTRY_FULL.md` (backport decision, timeline) and in the tracking table in
   `docs/DISCLOSURE_VD_REENTRY.md`.
+
+---
+
+## Follow-up, 2026-11-25
+
+The 19 Nov 2026 security releases now exist (8.2.36, 8.3.37, 8.4.28, 8.5.13) and all four contain
+`08f4b64`, so "no 8.5.13 exists yet" in the text above is historical. The affected range for released
+builds before that batch remains 7.0.33 - 8.5.12. The rest of the report still stands.

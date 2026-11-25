@@ -45,6 +45,8 @@ value is used as a `zval*` and dereferenced, which is the primitive a full chain
 
 The affected range we measured is therefore 7.0 through 8.5.12; 5.6 does not reproduce with the same shape.
 Since the fix exists only on `master` and no 8.5.13 has shipped, **no released PHP contains it**.
+*(Re-checked 2026-11-25: the 19 Nov 2026 releases 8.2.36 / 8.3.37 / 8.4.28 / 8.5.13 all contain
+`08f4b64`; the statement above describes the state when this was sent.)*
 
 Under gdb, the same probe with different fillers shows the address is ours:
 
